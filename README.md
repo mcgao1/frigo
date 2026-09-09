@@ -2,7 +2,7 @@
 
 Hand-drawn, space-themed prototype for a food-waste website (EN + NL).
 
-**Live site:** https://13114246155g-ops.github.io/frigo/
+**Live site:** https://mcgao1.github.io/frigo/
 
 ## What this is
 
