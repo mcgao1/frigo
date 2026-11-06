@@ -31,6 +31,7 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 | `clock.getLocalDate()` | A | B (game) | Proposed |
 | `food.getSnapshot()` | A | B (game) | Proposed |
 | `food.subscribeEvents()` | A | B (game) | Proposed |
+| `infrastructure.applyRepair()` | A | B (game / repair) | Proposed |
 
 ---
 
@@ -131,6 +132,24 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 | Error Format | *(TBD — to be agreed)* |
 | Status | Proposed |
 | Last Updated | 2026-11-05 |
+
+## `infrastructure.applyRepair()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `infrastructure.applyRepair()` |
+| Owner | A |
+| Used By | B (game / repair) |
+| Purpose | Notify infrastructure that a fridge component has been repaired, so the fridge's operational / cooling state is updated. Repair (B) handles the economy + progression side; the actual effect on cooling belongs to infrastructure (A). |
+| Parameters | *(proposed)* `({ component: string, level?: number })` — the repaired component id, optionally a new condition level |
+| Return Type | *(proposed)* `{ ok: boolean }` / `void` |
+| Error Format | *(TBD — to be agreed; e.g. unknown component)* |
+| Status | Proposed |
+| Last Updated | 2026-11-06 |
+
+> Proposed by B (repair module) on 2026-11-06. The repair module currently calls
+> this best-effort (ignores failures) so it is not yet a hard dependency. Needs
+> A's confirmation before it can be relied on (move to `Agreed`).
 
 ---
 
