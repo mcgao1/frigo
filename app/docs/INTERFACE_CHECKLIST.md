@@ -1,46 +1,153 @@
-# FRIGO Interface Checklist
+# Interface Checklist
 
-Day 1 接口登记；开发者 B 提出，Owner A 尚未确认。最后整理：2026-11-05。
+Registry of cross-module interfaces for the Frigo single-player game (`app/`).
+Maintained jointly by Developer **A** (food / economy / infrastructure) and
+Developer **B** (game / progression). See [COLLABORATION.md](./COLLABORATION.md)
+for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workflow.
 
-所有条目目前均为 **Proposed**。名称、用途和使用方是讨论起点；函数名中的 `()` 不表示已确定无参数。同步/异步、参数、返回类型、错误处理均未锁定。本轮不创建类型声明、桩函数或实现。
+## Status lifecycle
 
-## 状态与确认记录
+`Proposed` → `Agreed` → `Implemented` → `Tested`
 
-`Proposed → Agreed → Implemented → Tested`
+- **Proposed** — name and shape are a draft from one side; nothing is fixed.
+- **Agreed** — both developers have confirmed the signature and error format.
+- **Implemented** — the owner has shipped it behind this agreed signature.
+- **Tested** — covered by tests and verified by the consumer.
 
-- Proposed：已提出，等待 Owner 与使用方讨论。
-- Agreed：双方明确确认名称、语义、参数、返回值与错误约定，并在条目下记录确认人、日期及 PR/讨论链接。不能仅由 AI 改状态认定已确认。
-- Implemented：实现已完成，记录实现位置，尚不代表测试通过。
-- Tested：相关测试已通过，记录测试命令、日期和结果。
-- 每次更新同步修改 Last Updated。已确认接口的新修改应单独登记变更提案，保留当前有效约定，获确认后再实施。
+> ⚠️ **Nothing below is locked yet.** The function names are the *current
+> proposal* only. Parameters, return types, and error formats have **not** been
+> confirmed by both sides — do not assume any signature is final. Only an entry
+> marked `Agreed` (or later) may be depended on, and from that point it must
+> stay backward-compatible (see COLLABORATION.md).
 
-## 初始接口
+## Ownership at a glance
 
-| Interface Name | Owner | Used By | Purpose | Parameters | Return Type | Error Format | Status | Last Updated |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| `wallet.getBalance()` | A | B：repair / detector / voyage / exploration（拟） | 查询当前 GP 余额 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `transaction.execute()` | A | B：repair / detector / voyage / exploration（拟） | 请求一次经济操作；扣费、结果保存与重复调用的边界需讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `gameStorage.load()` | A | A：初始化；B：恢复游戏进度（拟） | 读取已保存的数据；读取范围和存档版本待讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `gameStorage.save()` | A | A：数据保存；B：游戏进度保存（拟） | 保存数据；与 transaction 的职责边界待讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `clock.getLocalDate()` | A | A：每日奖励；B：story / letters / detector（拟） | 提供本地日期；日期格式、跨日和测试时钟待讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `food.getSnapshot()` | A | B：detector / exploration（拟） | 查询食物状态；字段、只读约束和副本语义待讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
-| `food.subscribeEvents()` | A | B：detector / progression（拟） | 订阅食物操作；事件种类、载荷、取消订阅和重复处理待讨论 | 待双方确认 | 待双方确认；包括同步/异步 | 待双方确认 | Proposed | 2026-11-05 |
+| Interface | Owner | Used By | Status |
+|---|---|---|---|
+| `wallet.getBalance()` | A | B (game) | Proposed |
+| `transaction.execute()` | A | B (game) | Proposed |
+| `gameStorage.load()` | A | B (game) | Proposed |
+| `gameStorage.save()` | A | B (game) | Proposed |
+| `clock.getLocalDate()` | A | B (game) | Proposed |
+| `food.getSnapshot()` | A | B (game) | Proposed |
+| `food.subscribeEvents()` | A | B (game) | Proposed |
 
-## 逐项确认与验证记录
+---
 
-确认某一接口时在此新增记录，使用以下模板。未填写不代表已确认。
+## `wallet.getBalance()`
 
-- Interface Name：
-- 提案/变更说明：
-- 已确认的 Parameters / Return Type / Error Format（含同步/异步）：
-- Owner 与使用方确认人、日期、PR/讨论链接：
-- 实现文件：
-- 测试命令、日期、结果及未验证事项：
-- Status / Last Updated：
+| Field | Value |
+|---|---|
+| Interface Name | `wallet.getBalance()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Read the player's current wallet balance — to display funds and gate purchases / repairs. |
+| Parameters | *(proposed)* none |
+| Return Type | *(proposed)* `number` — balance in currency units |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
 
-## Day 1 查重与验证
+## `transaction.execute()`
 
-- 基线：`origin/main` 的 `def9de0`。
-- 在现有 HTML / JS / TS / Markdown 中搜索上述接口名称及核心方法名，未找到对应接口实现。
-- 原网页有内部 `save()`，仅用于 `frigoFridgeTune` 网页调参数据，不是游戏存档服务；不修改，也不直接视为可复用跨模块接口。
-- 本轮只有文档和空目录占位，无可执行游戏模块或游戏测试框架；接口状态全部保持 Proposed。
+| Field | Value |
+|---|---|
+| Interface Name | `transaction.execute()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Execute a wallet transaction (debit or credit) atomically and update the balance. |
+| Parameters | *(proposed)* `{ amount: number, kind: "debit" \| "credit", reason?: string }` |
+| Return Type | *(proposed)* `{ ok: boolean, balance: number }` |
+| Error Format | *(TBD — to be agreed; e.g. insufficient funds)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+## `gameStorage.load()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `gameStorage.load()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Load persisted game / progression state for the current player. |
+| Parameters | *(proposed)* `(key?: string)` |
+| Return Type | *(proposed)* saved state object, or `null` when nothing is stored |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+## `gameStorage.save()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `gameStorage.save()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Persist game / progression state for the current player. |
+| Parameters | *(proposed)* `(state: object)` — or `(key: string, value: unknown)` |
+| Return Type | *(proposed)* `boolean` / `void` |
+| Error Format | *(TBD — to be agreed; e.g. storage quota exceeded)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+## `clock.getLocalDate()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `clock.getLocalDate()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Get the current local date for daily / time-gated progression (letters, voyages, detectors). |
+| Parameters | *(proposed)* none |
+| Return Type | *(proposed)* `Date`, or an ISO `YYYY-MM-DD` string |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+## `food.getSnapshot()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `food.getSnapshot()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Get a point-in-time snapshot of the current food state (inventory / freshness). |
+| Parameters | *(proposed)* none |
+| Return Type | *(proposed)* food-state object |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+## `food.subscribeEvents()`
+
+| Field | Value |
+|---|---|
+| Interface Name | `food.subscribeEvents()` |
+| Owner | A |
+| Used By | B (game) |
+| Purpose | Subscribe to food-domain events (added, removed, spoiled, …) so the game can react. |
+| Parameters | *(proposed)* `(callback: (event) => void)` |
+| Return Type | *(proposed)* `unsubscribe: () => void` |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-05 |
+
+---
+
+## How to add or change an entry
+
+1. Whoever first needs an interface adds a row here with status **Proposed** and
+   fills in every field (use *TBD* where it is genuinely open).
+2. The two developers discuss; once both confirm, set the status to **Agreed**
+   and update *Last Updated*.
+3. The owner implements it, then marks **Implemented**; once tested by the
+   consumer, mark **Tested**.
+4. An `Agreed`/`Implemented`/`Tested` interface must not be renamed, removed, or
+   changed incompatibly without re-agreeing first.
+
+## Day 1 clarification and validation (2026-11-06)
+
+- All seven interfaces remain **Proposed**. Suggested signatures above are discussion examples only, not agreed contracts. Parentheses in a function name do not establish that it takes no arguments. Synchronous/asynchronous behavior is also pending agreement.
+- Before moving to Agreed, record the owner and consumer confirmations, date, and PR/discussion link. Before moving to Implemented or Tested, record the implementation path and relevant test command/results.
+- Existing website code was searched for these interfaces and equivalent responsibilities. Its internal `save()` only persists `frigoFridgeTune` presentation settings; it is not the proposed game storage service.
+- Day 1 adds documentation and tracked empty directories only. No game implementation or executable game test suite is introduced. Website files and assets remain unchanged from the main baseline.

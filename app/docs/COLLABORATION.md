@@ -1,49 +1,69 @@
-# FRIGO 双人协作规则
+# Collaboration Rules
 
-## 范围与所有权
+How Developer **A** and Developer **B** work together on the Frigo single-player
+game under `app/`. The existing website prototype (`index.html`, `assets/`,
+`网页素材/`) is **not** part of this and must be left untouched.
 
-保留根目录 `index.html`、`assets/` 和 `网页素材/` 原状，不修改、迁移或删除。新单机项目放在 `app/`；Day 1 只建立结构和规则，不制作 UI、动画或游戏功能，不选定框架或添加依赖。
+## Ownership
 
-| 范围 | Owner | 职责 |
-| --- | --- | --- |
-| `app/src/food/` | A | 食物及消耗记录 |
-| `app/src/economy/` | A | GP 余额、经济操作 |
-| `app/src/infrastructure/` | A | 存档、时钟等基础能力 |
-| `app/src/game/` | B | repair、detector、voyage、exploration、collection、story、letters |
-| `app/src/contracts/` | A + B | 双方确认后的跨模块契约 |
-| `app/src/config/` | A + B | 共享配置 |
-| 集成测试 | A + B | 验证模块之间的完整链路；位置和测试工具后续确认 |
-| `app/docs/` 与根目录 `AGENTS.md` | A + B | 接口登记和协作规范 |
+| Area | Owner | Path(s) |
+|---|---|---|
+| Food | A | `app/src/food/` |
+| Economy | A | `app/src/economy/` |
+| Infrastructure | A | `app/src/infrastructure/` |
+| Game / progression | B | `app/src/game/` (repair, detector, voyage, exploration, collection, story, letters) |
+| Contracts | A + B (shared) | `app/src/contracts/` |
+| Config | A + B (shared) | `app/src/config/` |
+| Integration tests | A + B (shared) | — |
 
-空目录用 `.gitkeep` 跟踪。首次添加实际文件时可删除该目录的占位文件。
+- **A owns** food, economy, and infrastructure.
+- **B owns** game.
+- **`contracts`, `config`, and integration tests are maintained jointly** — change
+  them by agreement, not unilaterally.
 
-## 开发前：查重与接口提案
+## Before you build
 
-1. 阅读 `INTERFACE_CHECKLIST.md` 和本文件，检查当前分支及未提交修改。
-2. 先搜索已有接口、函数与相同职责的实现，包括名称不同但用途相同的代码；优先复用，避免重复实现。
-3. 谁先需要新接口，谁先在 Checklist 登记 Proposed，说明 Owner、使用方、用途和待讨论的输入输出及错误格式。
-4. Owner 与使用方确认后，才能登记为 Agreed；确认记录要可追溯。接口提案不是实现授权，也不是已生效契约。
-5. 跨模块通过已确认接口协作，不直接修改另一模块内部状态。对 Proposed 的依赖先等待确认，或只完成不依赖该接口的工作。
+- **Search first.** Before writing anything, search the repo for existing
+  interfaces and functions that already do what you need.
+- **Reuse over re-implement.** Prefer an existing function to a new one; do not
+  duplicate logic that already exists elsewhere.
 
-## 修改边界
+## Interfaces (cross-module contracts)
 
-- A 不擅自修改 B 的 game；B 不擅自修改 A 的 food / economy / infrastructure。
-- 必要的跨所有权修改，先说明原因、影响、拟修改文件并获得对应负责人的明确确认。
-- contracts、config 和集成测试共同维护；影响另一方的约定修改必须双方确认。
-- 已确认接口默认保持兼容，不擅自删除、重命名或改变输入输出、错误约定和行为。破坏性修改先登记提案、说明迁移影响并获得确认。
-- AI Agent 只做当前任务所需的最小修改，不自动修复、重构或格式化无关代码。发现无关问题只报告。
+- Whoever first needs a new cross-module interface **proposes and registers it
+  first** in [`INTERFACE_CHECKLIST.md`](./INTERFACE_CHECKLIST.md) with status
+  `Proposed`.
+- An interface is **official only after both developers confirm it** (status
+  `Agreed`). Until then, names, parameters, return types, and error formats are
+  drafts — do not assume they are locked.
+- A confirmed interface (`Agreed` / `Implemented` / `Tested`) **stays
+  backward-compatible by default**. Do not modify, delete, or rename it on your
+  own.
+- If a confirmed interface genuinely must change, **state the reason and get the
+  other developer's confirmation first**, then update the checklist.
 
-## 测试与合并
+## Module boundaries
 
-1. 每完成一个模块，运行相关模块测试；跨模块修改同时运行相关集成测试。
-2. 更新 Checklist 的状态、实现位置、Last Updated 和测试证据。未运行或失败不能标为 Tested；没有测试工具时明确说明，不虚报通过。
-3. 功能开发从最新 main 建立独立分支。Day 1 B 分支为 `feature/day1-contracts-b`。
-4. 通过 Pull Request 评审并合并到 main，不直接向 main 推送功能代码。
-5. PR 说明本次目的、修改文件、接口新增/变更、查重结果、测试结果和未决事项。跨模块变更须得到相关 Owner 确认。
-6. 不覆盖对方未提交的修改，不为解决冲突而擅自改写已确认接口。
+- **Do not modify the other developer's modules.** B does not edit
+  `food` / `economy` / `infrastructure`; A does not edit `game`.
+- Any change that reaches into the other side's area must be **explained and
+  confirmed before it is made**.
 
-## Day 1 完成标准
+## Per-module routine
 
-- 所需目录可由 Git 跟踪；7 个初始接口均为 Proposed，输入输出和错误格式仍待双方确认。
-- 所有权和确认流程清楚；未引入实际功能、UI、动画或依赖。
-- 对比最新 main，原有网页文件与素材无变更。
+Each time a module is finished (or meaningfully changed):
+
+1. Run the relevant tests.
+2. Update [`INTERFACE_CHECKLIST.md`](./INTERFACE_CHECKLIST.md) (statuses, fields,
+   *Last Updated*).
+
+## Merging
+
+- Merge into `main` **through a Pull Request**.
+- **Never push feature code directly to `main`.**
+
+## AI agents
+
+- An AI agent must **not auto-"fix" unrelated code**. It stays within the task
+  and the owner's area. See [`AGENTS.md`](../../AGENTS.md) for the full agent
+  workflow.
