@@ -5,6 +5,6 @@
   "description": "Frigo single-player game — shared project for Developer A (food / economy / infrastructure) and Developer B (game / progression).",
   "type": "module",
   "scripts": {
-    "test": "echo \"No tests yet — test runner to be agreed by A and B.\" && exit 0"
+    "test": "node --test"
   }
 }
