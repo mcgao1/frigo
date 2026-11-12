@@ -86,3 +86,10 @@ export function createMockDeps({ balance = 200 } = {}) {
     ledger: money.ledger,
   };
 }
+
+/** Deterministic RNG for tests: cycles through `values` (each in [0,1)). */
+export function createSequenceRandom(values = [0]) {
+  const arr = values.length ? values : [0];
+  let i = 0;
+  return () => arr[i++ % arr.length];
+}

@@ -1,36 +1,47 @@
 /**
- * Repair module (Developer B — game / progression).
+ * Fridge-build module (Developer B — game / progression).
  *
- * The fridge has a set of repairable components. The player spends wallet funds
- * to fix them; a fixed component is reported to infrastructure (which owns the
- * cooling effect) and the repair progress is persisted.
+ * Formerly "component repair". The fridge now starts as a bare shelf and is
+ * assembled from a fixed set of same-price FRAGMENTS. The player:
+ *   1. BUYS a fragment — spends `cost` GP and receives a RANDOM fragment they do
+ *      not own yet (owned fragments are never drawn again); and
+ *   2. INSTALLS an owned fragment onto the fridge — free.
+ * Buying and installing are tracked separately and persisted. When all fragments
+ * are installed the fridge build is complete.
  *
- * This module owns only the game-side logic (catalog, affordability gating,
- * progression, persistence shape). It reaches A's domains strictly through the
- * injected ports in ./ports.js — it never imports food / economy / infrastructure.
+ * Game-side logic only (catalog, affordability gating, random draw, progression,
+ * persistence shape). A's domains are reached strictly through the injected ports
+ * in ./ports.js — it never imports food / economy / infrastructure.
  *
  * @typedef {import("./ports.js").RepairDeps} RepairDeps
  */
 
-/** Default storage key for repair progress. */
+/** Default storage key for fridge-build progress. */
 export const DEFAULT_STORAGE_KEY = "game.repair";
 
+/** Every fragment costs the same. */
+export const FRAGMENT_COST = 5;
+
 /**
- * Default repairable fridge components and their costs.
- * NOTE: costs are game-design data. They live here for now; if A and B later
- * want a shared price source, this can move to app/src/config/ by agreement.
+ * The fridge fragments — six same-price parts added onto the starting shelf.
+ * `slot` is layout metadata for the UI (where the piece sits); game logic uses
+ * only `id`. Game-design data; may move to app/src/config/ by agreement.
  */
-export const DEFAULT_COMPONENTS = [
-  { id: "door_seal", name: "Door seal", cost: 20 },
-  { id: "thermostat", name: "Thermostat", cost: 45 },
-  { id: "light", name: "Interior light", cost: 10 },
-  { id: "compressor", name: "Compressor", cost: 120 },
+export const DEFAULT_FRAGMENTS = [
+  { id: "drawer", name: "Crisper drawer", slot: "bottom" },
+  { id: "door", name: "Door panel", slot: "left" },
+  { id: "light", name: "Interior light", slot: "ceiling" },
+  { id: "rack", name: "Side rack", slot: "right" },
+  { id: "freezer", name: "Freezer tray", slot: "freezer" },
+  { id: "seal", name: "Door seal", slot: "door-edge" },
 ];
 
-/** Error codes the repair module can raise. */
+/** Error codes the fridge-build module can raise. */
 export const RepairErrorCode = Object.freeze({
-  UNKNOWN_COMPONENT: "UNKNOWN_COMPONENT",
-  ALREADY_REPAIRED: "ALREADY_REPAIRED",
+  UNKNOWN_FRAGMENT: "UNKNOWN_FRAGMENT",
+  ALL_OWNED: "ALL_OWNED",
+  NOT_OWNED: "NOT_OWNED",
+  ALREADY_INSTALLED: "ALREADY_INSTALLED",
   INSUFFICIENT_FUNDS: "INSUFFICIENT_FUNDS",
   TRANSACTION_FAILED: "TRANSACTION_FAILED",
 });
@@ -52,10 +63,10 @@ function toISODate(value) {
 }
 
 /**
- * Create a repair module instance.
+ * Create a fridge-build (repair) module instance.
  * @param {RepairDeps} deps
- * @param {{ components?: Array<{id:string,name:string,cost:number}>,
- *           storageKey?: string }} [options]
+ * @param {{ fragments?: Array<{id:string,name:string,slot?:string}>,
+ *           cost?: number, storageKey?: string, random?: () => number }} [options]
  */
 export function createRepairModule(deps, options = {}) {
   const { wallet, transaction, gameStorage, clock, infrastructure } = deps ?? {};
@@ -70,93 +81,126 @@ export function createRepairModule(deps, options = {}) {
   }
 
   const storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
-  const catalog = (options.components ?? DEFAULT_COMPONENTS).map((c) => ({ ...c }));
-  const byId = new Map(catalog.map((c) => [c.id, c]));
+  const cost = options.cost ?? FRAGMENT_COST;
+  const random = typeof options.random === "function" ? options.random : Math.random;
+  const catalog = (options.fragments ?? DEFAULT_FRAGMENTS).map((f) => ({ ...f }));
+  const byId = new Map(catalog.map((f) => [f.id, f]));
 
-  /** @type {{ repaired: Record<string, { at: string | null }> }} */
-  let state = { repaired: {} };
+  /** @type {{ fragments: Record<string, { boughtAt: string|null, installedAt: string|null }> }} */
+  let state = { fragments: {} };
 
-  /** Load persisted repair progress. Call once before use. */
+  /** Load persisted progress. Call once before use. */
   async function init() {
     const loaded = await gameStorage.load(storageKey);
-    if (loaded && typeof loaded === "object" && loaded.repaired) {
-      state = { repaired: { ...loaded.repaired } };
+    if (loaded && typeof loaded === "object" && loaded.fragments) {
+      state = { fragments: structuredClone(loaded.fragments) };
     } else {
-      state = { repaired: {} };
+      state = { fragments: {} };
     }
     return snapshot();
   }
 
-  function isRepaired(id) {
-    return Boolean(state.repaired[id]);
-  }
+  const isOwned = (id) => Boolean(state.fragments[id]);
+  const isInstalled = (id) => Boolean(state.fragments[id]?.installedAt);
+  const ownedCount = () => Object.keys(state.fragments).length;
+  const installedCount = () => Object.values(state.fragments).filter((f) => f.installedAt).length;
+  const isComplete = () => installedCount() === catalog.length;
 
-  /** List every component with status. `affordable` reflects `balance`. */
+  /** List every fragment with status. `affordable` reflects `balance`. */
   function list(balance = Infinity) {
-    return catalog.map((c) => ({
-      id: c.id,
-      name: c.name,
-      cost: c.cost,
-      repaired: isRepaired(c.id),
-      repairedAt: state.repaired[c.id]?.at ?? null,
-      affordable: !isRepaired(c.id) && balance >= c.cost,
+    return catalog.map((f) => ({
+      id: f.id,
+      name: f.name,
+      slot: f.slot ?? null,
+      cost,
+      owned: isOwned(f.id),
+      installed: isInstalled(f.id),
+      boughtAt: state.fragments[f.id]?.boughtAt ?? null,
+      installedAt: state.fragments[f.id]?.installedAt ?? null,
+      affordable: !isOwned(f.id) && balance >= cost,
     }));
   }
 
   function get(id) {
-    const c = byId.get(id);
-    if (!c) return null;
+    const f = byId.get(id);
+    if (!f) return null;
     return {
-      id: c.id,
-      name: c.name,
-      cost: c.cost,
-      repaired: isRepaired(id),
-      repairedAt: state.repaired[id]?.at ?? null,
+      id: f.id,
+      name: f.name,
+      slot: f.slot ?? null,
+      cost,
+      owned: isOwned(id),
+      installed: isInstalled(id),
+      boughtAt: state.fragments[id]?.boughtAt ?? null,
+      installedAt: state.fragments[id]?.installedAt ?? null,
     };
   }
 
+  function getProgress() {
+    return { owned: ownedCount(), installed: installedCount(), total: catalog.length, complete: isComplete() };
+  }
+
   function snapshot() {
-    return { repaired: { ...state.repaired } };
+    return { fragments: structuredClone(state.fragments) };
+  }
+
+  async function persist() {
+    await gameStorage.save({ key: storageKey, ...snapshot() });
   }
 
   /**
-   * Repair a component: gate on balance, debit the wallet, mark repaired,
-   * notify infrastructure (best-effort), and persist.
-   * @param {string} id
-   * @returns {Promise<{ ok: true, component: string, balance: number }>}
+   * Buy a RANDOM not-yet-owned fragment: gate on balance, debit the wallet, mark
+   * owned (not installed), and persist.
+   * @returns {Promise<{ ok: true, fragment: string, name: string, balance: number }>}
    */
-  async function repair(id) {
-    const component = byId.get(id);
-    if (!component) {
-      throw new RepairError(RepairErrorCode.UNKNOWN_COMPONENT, `Unknown component: ${id}`, { id });
-    }
-    if (isRepaired(id)) {
-      throw new RepairError(RepairErrorCode.ALREADY_REPAIRED, `Already repaired: ${id}`, { id });
+  async function buy() {
+    const unowned = catalog.filter((f) => !isOwned(f.id));
+    if (unowned.length === 0) {
+      throw new RepairError(RepairErrorCode.ALL_OWNED, "All fragments already owned", {});
     }
 
     const balance = await wallet.getBalance();
-    if (balance < component.cost) {
-      throw new RepairError(
-        RepairErrorCode.INSUFFICIENT_FUNDS,
-        `Need ${component.cost}, have ${balance}`,
-        { id, cost: component.cost, balance },
-      );
+    if (balance < cost) {
+      throw new RepairError(RepairErrorCode.INSUFFICIENT_FUNDS, `Need ${cost}, have ${balance}`, { cost, balance });
     }
 
-    const result = await transaction.execute({
-      amount: component.cost,
-      kind: "debit",
-      reason: `repair:${id}`,
-    });
+    const pick = unowned[Math.floor(random() * unowned.length)] ?? unowned[0];
+
+    const result = await transaction.execute({ amount: cost, kind: "debit", reason: `fragment:buy:${pick.id}` });
     if (!result || result.ok !== true) {
-      throw new RepairError(RepairErrorCode.TRANSACTION_FAILED, `Transaction failed for ${id}`, { id, result });
+      throw new RepairError(RepairErrorCode.TRANSACTION_FAILED, "Transaction failed buying a fragment", { result });
     }
 
     const at = toISODate(clock ? await clock.getLocalDate() : null);
-    state.repaired[id] = { at };
+    state.fragments[pick.id] = { boughtAt: at, installedAt: null };
+    await persist();
 
-    // Best-effort: cooling effect is infrastructure's (A) responsibility and the
-    // interface is only Proposed, so a failure here must not fail the repair.
+    return { ok: true, fragment: pick.id, name: pick.name, balance: result.balance };
+  }
+
+  /**
+   * Install an owned, not-yet-installed fragment onto the fridge (free).
+   * Notifies infrastructure best-effort and persists.
+   * @param {string} id
+   * @returns {Promise<{ ok: true, fragment: string, installed: number, total: number, complete: boolean }>}
+   */
+  async function install(id) {
+    const f = byId.get(id);
+    if (!f) {
+      throw new RepairError(RepairErrorCode.UNKNOWN_FRAGMENT, `Unknown fragment: ${id}`, { id });
+    }
+    const rec = state.fragments[id];
+    if (!rec) {
+      throw new RepairError(RepairErrorCode.NOT_OWNED, `Fragment not owned: ${id}`, { id });
+    }
+    if (rec.installedAt) {
+      throw new RepairError(RepairErrorCode.ALREADY_INSTALLED, `Already installed: ${id}`, { id });
+    }
+
+    rec.installedAt = toISODate(clock ? await clock.getLocalDate() : null);
+
+    // Best-effort: the real cooling effect is infrastructure's (A) responsibility
+    // and the interface is only Proposed, so a failure here must not fail install.
     if (infrastructure && typeof infrastructure.applyRepair === "function") {
       try {
         await infrastructure.applyRepair({ component: id });
@@ -165,10 +209,9 @@ export function createRepairModule(deps, options = {}) {
       }
     }
 
-    await gameStorage.save({ key: storageKey, ...snapshot() });
-
-    return { ok: true, component: id, balance: result.balance };
+    await persist();
+    return { ok: true, fragment: id, installed: installedCount(), total: catalog.length, complete: isComplete() };
   }
 
-  return { init, list, get, repair, isRepaired, snapshot, storageKey };
+  return { init, list, get, getProgress, buy, install, isOwned, isInstalled, isComplete, snapshot, storageKey };
 }
