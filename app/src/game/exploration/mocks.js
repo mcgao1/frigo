@@ -8,10 +8,11 @@
 import {
   createMockWalletWithTransactions,
   createMockStorage,
+  createSequenceRandom,
 } from "../repair/mocks.js";
 import { createMockClock } from "../voyage/mocks.js";
 
-export { createMockWalletWithTransactions, createMockStorage, createMockClock };
+export { createMockWalletWithTransactions, createMockStorage, createMockClock, createSequenceRandom };
 
 /**
  * Convenience: a full set of mocked deps for the exploration module.

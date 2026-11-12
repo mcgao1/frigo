@@ -1,11 +1,15 @@
 /**
  * Exploration module (Developer B — game / progression).
  *
- * The fridge's surroundings are a small map of areas. Each day the player gets a
- * budget of exploration energy (regenerated against the clock). Spending energy
- * explores a site in an unlocked area and yields a coin find; locked areas are
- * opened by paying coins. Progress (unlocked areas, discovered sites, energy) is
- * persisted.
+ * A single dig site next to the fridge. Each dig costs a flat DIG_COST GP and
+ * rolls a weighted loot table: mostly junk / storage tips / recipes, with an
+ * occasional small GP refund. Recipes and tips are collectibles (each kept once);
+ * junk and GP are not. The loot table is GP-negative on average, so digging is a
+ * side-activity SINK, not a GP farm. Totals + the collected recipes/tips persist.
+ *
+ * This is deliberately separate from the detector's one-off "free dig" that
+ * uncovers the detector — that is a mainline step; this is the optional,
+ * paid, repeatable dig.
  *
  * Game-side logic only. A's domains are reached strictly through the injected
  * ports in ./ports.js — exploration never imports food / economy / infrastructure.
@@ -14,48 +18,51 @@
  */
 
 export const DEFAULT_STORAGE_KEY = "game.exploration";
-export const DEFAULT_MAX_ENERGY = 3;
+
+/** Flat GP cost of one dig. */
+export const DIG_COST = 5;
+
+/** Collectible recipes the dig can turn up. Game-design data. */
+export const DEFAULT_RECIPES = [
+  { id: "fried-rice", name: "Leftover fried rice" },
+  { id: "scrap-stock", name: "Veg-scrap stock" },
+  { id: "banana-bread", name: "Overripe-banana bread" },
+  { id: "greens-soup", name: "Wilting-greens soup" },
+  { id: "frittata", name: "Odds-and-ends frittata" },
+];
+
+/** Collectible storage tips the dig can turn up. Game-design data. */
+export const DEFAULT_TIPS = [
+  { id: "herbs-water", name: "Stand herbs stem-down in water" },
+  { id: "freeze-bread", name: "Freeze bread before it stales" },
+  { id: "onion-potato", name: "Keep onions away from potatoes" },
+  { id: "fifo", name: "First in, first eaten — shelve by date" },
+  { id: "breathe", name: "Loosen bags so greens can breathe" },
+];
+
+/** Flavor junk (not collected — just a miss). Game-design data. */
+export const DEFAULT_JUNK = [
+  { id: "cap", name: "a rusty bottle cap" },
+  { id: "sock", name: "a single odd sock" },
+  { id: "bone", name: "an old fish bone" },
+  { id: "clip", name: "a bent paperclip" },
+  { id: "magnet", name: "a cracked fridge magnet" },
+];
 
 /**
- * Default map. An area with `unlockCost` 0 starts unlocked. Each `site` is
- * discoverable once and credits `coins` when found. Game-design data (movable to
- * app/src/config/ later by agreement).
+ * Weighted loot table. Weights are relative; `gp` entries also carry an inclusive
+ * refund range. Average GP back ≈ 0.20 × 5.5 ≈ 1.1 per 5 GP dig (a net sink).
  */
-export const DEFAULT_MAP = [
-  {
-    id: "pantry",
-    name: "Pantry",
-    unlockCost: 0,
-    sites: [
-      { id: "pantry-1", name: "Dusty shelf", coins: 30 },
-      { id: "pantry-2", name: "Back corner", coins: 50 },
-    ],
-  },
-  {
-    id: "cellar",
-    name: "Cellar",
-    unlockCost: 100,
-    sites: [
-      { id: "cellar-1", name: "Cold rack", coins: 80 },
-      { id: "cellar-2", name: "Hidden crate", coins: 120 },
-    ],
-  },
-  {
-    id: "attic",
-    name: "Attic",
-    unlockCost: 250,
-    sites: [{ id: "attic-1", name: "Old trunk", coins: 200 }],
-  },
+export const DEFAULT_LOOT = [
+  { type: "junk", weight: 30 },
+  { type: "tip", weight: 28 },
+  { type: "recipe", weight: 22 },
+  { type: "gp", weight: 20, gp: { min: 3, max: 8 } },
 ];
 
 export const ExplorationErrorCode = Object.freeze({
-  UNKNOWN_AREA: "UNKNOWN_AREA",
-  AREA_LOCKED: "AREA_LOCKED",
-  ALREADY_UNLOCKED: "ALREADY_UNLOCKED",
   INSUFFICIENT_FUNDS: "INSUFFICIENT_FUNDS",
   TRANSACTION_FAILED: "TRANSACTION_FAILED",
-  NO_ENERGY: "NO_ENERGY",
-  AREA_EXHAUSTED: "AREA_EXHAUSTED",
 });
 
 export class ExplorationError extends Error {
@@ -75,7 +82,9 @@ function toISODate(value) {
 
 /**
  * @param {ExplorationDeps} deps
- * @param {{ map?: typeof DEFAULT_MAP, storageKey?: string, maxEnergy?: number }} [options]
+ * @param {{ storageKey?: string, cost?: number, recipes?: typeof DEFAULT_RECIPES,
+ *           tips?: typeof DEFAULT_TIPS, junk?: typeof DEFAULT_JUNK,
+ *           loot?: typeof DEFAULT_LOOT, random?: () => number }} [options]
  */
 export function createExplorationModule(deps, options = {}) {
   const { wallet, transaction, gameStorage, clock } = deps ?? {};
@@ -88,161 +97,118 @@ export function createExplorationModule(deps, options = {}) {
   if (!gameStorage || typeof gameStorage.load !== "function" || typeof gameStorage.save !== "function") {
     throw new TypeError("exploration: deps.gameStorage.load/save are required");
   }
-  if (!clock || typeof clock.getLocalDate !== "function") {
-    throw new TypeError("exploration: deps.clock.getLocalDate is required");
-  }
 
   const storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
-  const maxEnergy = options.maxEnergy ?? DEFAULT_MAX_ENERGY;
-  const map = (options.map ?? DEFAULT_MAP).map((a) => ({ ...a, sites: a.sites.map((s) => ({ ...s })) }));
-  const areaById = new Map(map.map((a) => [a.id, a]));
+  const cost = options.cost ?? DIG_COST;
+  const random = typeof options.random === "function" ? options.random : Math.random;
+  const recipes = (options.recipes ?? DEFAULT_RECIPES).map((r) => ({ ...r }));
+  const tips = (options.tips ?? DEFAULT_TIPS).map((t) => ({ ...t }));
+  const junk = (options.junk ?? DEFAULT_JUNK).map((j) => ({ ...j }));
+  const loot = (options.loot ?? DEFAULT_LOOT).map((l) => ({ ...l }));
 
-  /** @type {{ unlocked: string[], discovered: string[], energy: { value: number, date: string | null } }} */
-  let state = { unlocked: [], discovered: [], energy: { value: maxEnergy, date: null } };
+  /** @type {{ digs:number, recipes:string[], tips:string[], junk:number, gpReturned:number, lastFind:object|null }} */
+  let state = { digs: 0, recipes: [], tips: [], junk: 0, gpReturned: 0, lastFind: null };
 
   async function persist() {
     await gameStorage.save({ key: storageKey, ...state });
-  }
-
-  function ensureStartingUnlocks() {
-    for (const area of map) {
-      if (area.unlockCost === 0 && !state.unlocked.includes(area.id)) {
-        state.unlocked.push(area.id);
-      }
-    }
-  }
-
-  async function today() {
-    return toISODate(await clock.getLocalDate());
-  }
-
-  /** Refill energy to max when the local date has rolled over. */
-  async function refillEnergy() {
-    const now = await today();
-    if (state.energy.date !== now) {
-      state.energy = { value: maxEnergy, date: now };
-    }
-    return state.energy;
   }
 
   async function init() {
     const loaded = await gameStorage.load(storageKey);
     if (loaded && typeof loaded === "object") {
       state = {
-        unlocked: Array.isArray(loaded.unlocked) ? [...loaded.unlocked] : [],
-        discovered: Array.isArray(loaded.discovered) ? [...loaded.discovered] : [],
-        energy: loaded.energy && typeof loaded.energy === "object"
-          ? { value: loaded.energy.value ?? maxEnergy, date: loaded.energy.date ?? null }
-          : { value: maxEnergy, date: null },
+        digs: Number.isFinite(loaded.digs) ? loaded.digs : 0,
+        recipes: Array.isArray(loaded.recipes) ? [...loaded.recipes] : [],
+        tips: Array.isArray(loaded.tips) ? [...loaded.tips] : [],
+        junk: Number.isFinite(loaded.junk) ? loaded.junk : 0,
+        gpReturned: Number.isFinite(loaded.gpReturned) ? loaded.gpReturned : 0,
+        lastFind: loaded.lastFind ?? null,
       };
     } else {
-      state = { unlocked: [], discovered: [], energy: { value: maxEnergy, date: null } };
+      state = { digs: 0, recipes: [], tips: [], junk: 0, gpReturned: 0, lastFind: null };
     }
-    ensureStartingUnlocks();
-    await refillEnergy();
-    await persist();
-    return getState();
+    return getSnapshot();
   }
 
-  function isUnlocked(areaId) {
-    return state.unlocked.includes(areaId);
-  }
-
-  function undiscoveredSites(area) {
-    return area.sites.filter((s) => !state.discovered.includes(s.id));
-  }
-
-  function listAreas(balance = Infinity) {
-    return map.map((a) => ({
-      id: a.id,
-      name: a.name,
-      unlockCost: a.unlockCost,
-      unlocked: isUnlocked(a.id),
-      affordableToUnlock: !isUnlocked(a.id) && balance >= a.unlockCost,
-      sitesTotal: a.sites.length,
-      sitesFound: a.sites.filter((s) => state.discovered.includes(s.id)).length,
-    }));
-  }
-
-  async function getEnergy() {
-    await refillEnergy();
-    return { value: state.energy.value, max: maxEnergy, date: state.energy.date };
-  }
-
-  function getState() {
-    return {
-      unlocked: [...state.unlocked],
-      discovered: [...state.discovered],
-      energy: { ...state.energy },
-    };
-  }
-
-  /** Pay coins to unlock an area. */
-  async function unlock(areaId) {
-    const area = areaById.get(areaId);
-    if (!area) {
-      throw new ExplorationError(ExplorationErrorCode.UNKNOWN_AREA, `Unknown area: ${areaId}`, { areaId });
+  /** Roll the loot table. Consumes exactly two random() draws per dig. */
+  function rollLoot() {
+    const total = loot.reduce((s, e) => s + e.weight, 0);
+    let x = random() * total;
+    let bucket = loot[loot.length - 1];
+    for (const e of loot) {
+      if ((x -= e.weight) < 0) { bucket = e; break; }
     }
-    if (isUnlocked(areaId)) {
-      throw new ExplorationError(ExplorationErrorCode.ALREADY_UNLOCKED, `Already unlocked: ${areaId}`, { areaId });
+    if (bucket.type === "gp") {
+      const { min, max } = bucket.gp ?? { min: 0, max: 0 };
+      const amount = min + Math.floor(random() * (max - min + 1));
+      return { type: "gp", gp: amount };
     }
+    const pool = bucket.type === "recipe" ? recipes : bucket.type === "tip" ? tips : junk;
+    const have = bucket.type === "recipe" ? state.recipes : bucket.type === "tip" ? state.tips : [];
+    const fresh = pool.filter((p) => !have.includes(p.id));
+    const choices = fresh.length ? fresh : pool;
+    const pick = choices[Math.floor(random() * choices.length)] ?? choices[0];
+    return { type: bucket.type, id: pick.id, name: pick.name };
+  }
 
+  /** Pay the fare and dig once, returning the loot found. */
+  async function dig() {
     const balance = await wallet.getBalance();
-    if (balance < area.unlockCost) {
-      throw new ExplorationError(ExplorationErrorCode.INSUFFICIENT_FUNDS, `Need ${area.unlockCost}, have ${balance}`, {
-        areaId, cost: area.unlockCost, balance,
-      });
+    if (balance < cost) {
+      throw new ExplorationError(ExplorationErrorCode.INSUFFICIENT_FUNDS, `Need ${cost}, have ${balance}`, { cost, balance });
+    }
+    const debit = await transaction.execute({ amount: cost, kind: "debit", reason: "explore:dig" });
+    if (!debit || debit.ok !== true) {
+      throw new ExplorationError(ExplorationErrorCode.TRANSACTION_FAILED, "Dig transaction failed", { result: debit });
     }
 
-    const result = await transaction.execute({ amount: area.unlockCost, kind: "debit", reason: `exploration:unlock:${areaId}` });
-    if (!result || result.ok !== true) {
-      throw new ExplorationError(ExplorationErrorCode.TRANSACTION_FAILED, `Unlock transaction failed for ${areaId}`, { areaId, result });
+    const at = clock ? toISODate(await clock.getLocalDate()) : null;
+    const rolled = rollLoot();
+    state.digs += 1;
+
+    let loot_, balanceAfter = debit.balance;
+    if (rolled.type === "gp") {
+      const credit = await transaction.execute({ amount: rolled.gp, kind: "credit", reason: "explore:loot:gp" });
+      const credited = Boolean(credit && credit.ok === true);
+      if (credited) { state.gpReturned += rolled.gp; balanceAfter = credit.balance; }
+      loot_ = { type: "gp", gp: rolled.gp, credited };
+    } else if (rolled.type === "recipe") {
+      const isNew = !state.recipes.includes(rolled.id);
+      if (isNew) state.recipes.push(rolled.id);
+      loot_ = { type: "recipe", id: rolled.id, name: rolled.name, isNew };
+    } else if (rolled.type === "tip") {
+      const isNew = !state.tips.includes(rolled.id);
+      if (isNew) state.tips.push(rolled.id);
+      loot_ = { type: "tip", id: rolled.id, name: rolled.name, isNew };
+    } else {
+      state.junk += 1;
+      loot_ = { type: "junk", id: rolled.id, name: rolled.name };
     }
 
-    state.unlocked.push(areaId);
+    state.lastFind = { ...loot_, at };
     await persist();
-    return { ok: true, areaId, balance: result.balance };
+    return { ok: true, cost, loot: loot_, digs: state.digs, balance: balanceAfter };
   }
 
-  /** Spend one energy to discover the next site in an unlocked area. */
-  async function explore(areaId) {
-    const area = areaById.get(areaId);
-    if (!area) {
-      throw new ExplorationError(ExplorationErrorCode.UNKNOWN_AREA, `Unknown area: ${areaId}`, { areaId });
-    }
-    if (!isUnlocked(areaId)) {
-      throw new ExplorationError(ExplorationErrorCode.AREA_LOCKED, `Area is locked: ${areaId}`, { areaId });
-    }
-
-    await refillEnergy();
-    if (state.energy.value < 1) {
-      throw new ExplorationError(ExplorationErrorCode.NO_ENERGY, "Out of exploration energy", {
-        areaId, nextRefill: "next local date",
-      });
-    }
-
-    const remaining = undiscoveredSites(area);
-    if (remaining.length === 0) {
-      throw new ExplorationError(ExplorationErrorCode.AREA_EXHAUSTED, `Nothing left to find in ${areaId}`, { areaId });
-    }
-
-    const site = remaining[0];
-    const result = await transaction.execute({ amount: site.coins, kind: "credit", reason: `exploration:find:${site.id}` });
-    if (!result || result.ok !== true) {
-      throw new ExplorationError(ExplorationErrorCode.TRANSACTION_FAILED, `Reward credit failed for ${site.id}`, { site: site.id, result });
-    }
-
-    state.energy.value -= 1;
-    state.discovered.push(site.id);
-    await persist();
+  function getSnapshot() {
     return {
-      ok: true,
-      area: areaId,
-      site: { id: site.id, name: site.name, coins: site.coins },
-      energy: state.energy.value,
-      balance: result.balance,
+      digs: state.digs,
+      cost,
+      recipes: [...state.recipes],
+      tips: [...state.tips],
+      junk: state.junk,
+      gpReturned: state.gpReturned,
+      lastFind: state.lastFind ? { ...state.lastFind } : null,
+      totals: { recipes: recipes.length, tips: tips.length },
     };
   }
 
-  return { init, listAreas, getEnergy, getState, unlock, explore, isUnlocked, storageKey, maxEnergy };
+  function listRecipes() {
+    return recipes.map((r) => ({ id: r.id, name: r.name, found: state.recipes.includes(r.id) }));
+  }
+  function listTips() {
+    return tips.map((t) => ({ id: t.id, name: t.name, found: state.tips.includes(t.id) }));
+  }
+
+  return { init, dig, getSnapshot, listRecipes, listTips, cost, storageKey };
 }
