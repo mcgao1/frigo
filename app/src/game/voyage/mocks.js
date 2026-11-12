@@ -30,11 +30,9 @@ export function createMockClock(date = "2026-11-09") {
 }
 
 /**
- * Convenience: a full set of mocked deps for the voyage module. A deterministic
- * rng (always 0 → reward == min) is returned separately so tests can pass it to
- * createVoyageModule's options for repeatable rewards.
+ * Convenience: a full set of mocked deps for the voyage module.
  * @param {{ balance?: number, today?: string }} [opts]
- * @returns {VoyageDeps & { ledger: any[], rngMin: () => number }}
+ * @returns {VoyageDeps & { ledger: any[] }}
  */
 export function createMockDeps({ balance = 300, today = "2026-11-09" } = {}) {
   const money = createMockWalletWithTransactions(balance);
@@ -44,6 +42,5 @@ export function createMockDeps({ balance = 300, today = "2026-11-09" } = {}) {
     gameStorage: createMockStorage(),
     clock: createMockClock(today),
     ledger: money.ledger,
-    rngMin: () => 0,
   };
 }

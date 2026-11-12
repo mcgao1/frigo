@@ -1,152 +1,133 @@
 /**
- * Tests for the voyage module, run against mocked A ports.
- * Run with `node --test src/game/voyage/voyage.test.js` from app/.
+ * Tests for the voyage module (one-way planet relocation), run against mocked A
+ * ports. Run with `node --test src/game/voyage/voyage.test.js` from app/.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 
-import { createVoyageModule, VoyageErrorCode } from "./voyage.js";
-import { createMockDeps, createMockClock, createMockStorage, createMockWalletWithTransactions } from "./mocks.js";
+import { createVoyageModule, VoyageErrorCode, VOYAGE_COST, DEFAULT_PLANETS } from "./voyage.js";
+import { createMockDeps, createMockWalletWithTransactions, createMockStorage, createMockClock } from "./mocks.js";
 
-// reward min is used with the deterministic rng (always 0)
-const COASTAL_MIN = 40;
+const READY = () => true;
 
-test("init defaults to no active voyage and empty history", async () => {
-  const v = createVoyageModule(createMockDeps());
-  const state = await v.init();
-  assert.equal(state.active, null);
-  assert.deepEqual(state.history, []);
+test("init starts on the first planet with no arrivals", async () => {
+  const v = createVoyageModule(createMockDeps(), { requirementsMet: READY });
+  const s = await v.init();
+  assert.equal(s.planetIndex, 0);
+  assert.equal(s.planet.id, DEFAULT_PLANETS[0].id);
+  assert.equal(s.nextPlanet.id, DEFAULT_PLANETS[1].id);
+  assert.equal(s.cost, VOYAGE_COST);
+  assert.deepEqual(s.arrivals, []);
 });
 
-test("listRoutes marks affordability from balance", async () => {
-  const v = createVoyageModule(createMockDeps());
-  const routes = v.listRoutes(100);
-  assert.equal(routes.find((r) => r.id === "coastal").affordable, true); // 30
-  assert.equal(routes.find((r) => r.id === "arctic").affordable, false); // 200
+test("listPlanets marks reached and current", async () => {
+  const v = createVoyageModule(createMockDeps(), { requirementsMet: READY });
+  await v.init();
+  const ps = v.listPlanets();
+  assert.equal(ps[0].current, true);
+  assert.equal(ps[0].reached, true);
+  assert.equal(ps[1].reached, false);
 });
 
-test("launch debits cost, sets active voyage with a return date", async () => {
-  const deps = createMockDeps({ balance: 300, today: "2026-11-09" });
-  const v = createVoyageModule(deps, { rng: deps.rngMin });
+test("depart is blocked until prerequisites are met (NOT_READY), and changes nothing", async () => {
+  const deps = createMockDeps({ balance: 300 });
+  let ready = false;
+  const v = createVoyageModule(deps, { requirementsMet: () => ready });
   await v.init();
 
-  const res = await v.launch("coastal");
-  assert.equal(res.ok, true);
-  assert.equal(res.balance, 270);
-  assert.equal(deps.wallet.getBalance(), 270);
-  assert.equal(deps.ledger[0].reason, "voyage:launch:coastal");
-
-  const active = await v.getActive();
-  assert.equal(active.routeId, "coastal");
-  assert.equal(active.startedAt, "2026-11-09");
-  assert.equal(active.returnsOn, "2026-11-10");
-  assert.equal(active.returned, false);
-  assert.equal(active.daysRemaining, 1);
-});
-
-test("cannot launch while a voyage is in progress", async () => {
-  const deps = createMockDeps();
-  const v = createVoyageModule(deps, { rng: deps.rngMin });
-  await v.init();
-  await v.launch("coastal");
-  await assert.rejects(() => v.launch("deep_sea"), (e) => {
-    assert.equal(e.code, VoyageErrorCode.VOYAGE_IN_PROGRESS);
+  await assert.rejects(() => v.depart(), (e) => {
+    assert.equal(e.code, VoyageErrorCode.NOT_READY);
     return true;
   });
+  assert.equal(v.getState().planetIndex, 0);
+  assert.equal(deps.wallet.getBalance(), 300);
+
+  ready = true; // prerequisites now satisfied
+  const r = await v.depart();
+  assert.equal(r.ok, true);
+  assert.equal(v.getState().planetIndex, 1);
 });
 
-test("unknown route throws", async () => {
-  const v = createVoyageModule(createMockDeps());
+test("a ready depart pays the fare, moves one planet, and logs the arrival", async () => {
+  const deps = createMockDeps({ balance: 300 });
+  const v = createVoyageModule(deps, { requirementsMet: READY });
   await v.init();
-  await assert.rejects(() => v.launch("mars"), (e) => {
-    assert.equal(e.code, VoyageErrorCode.UNKNOWN_ROUTE);
-    return true;
-  });
+
+  const r = await v.depart();
+  assert.equal(r.planet.id, DEFAULT_PLANETS[1].id);
+  assert.equal(r.planetIndex, 1);
+  assert.equal(r.balance, 300 - VOYAGE_COST);
+  assert.equal(deps.wallet.getBalance(), 300 - VOYAGE_COST);
+  assert.equal(deps.ledger[0].reason, `voyage:depart:${DEFAULT_PLANETS[1].id}`);
+
+  const s = v.getState();
+  assert.equal(s.planet.id, DEFAULT_PLANETS[1].id);
+  assert.equal(s.arrivals.length, 1);
+  assert.equal(s.arrivals[0].planetId, DEFAULT_PLANETS[1].id);
 });
 
-test("insufficient funds blocks launch and changes nothing", async () => {
-  const deps = createMockDeps({ balance: 10 });
-  const v = createVoyageModule(deps, { rng: deps.rngMin });
+test("insufficient funds blocks depart and changes nothing", async () => {
+  const deps = createMockDeps({ balance: VOYAGE_COST - 1 });
+  const v = createVoyageModule(deps, { requirementsMet: READY });
   await v.init();
-  await assert.rejects(() => v.launch("coastal"), (e) => {
+
+  await assert.rejects(() => v.depart(), (e) => {
     assert.equal(e.code, VoyageErrorCode.INSUFFICIENT_FUNDS);
     return true;
   });
-  assert.equal(deps.wallet.getBalance(), 10);
-  assert.equal(await v.getActive(), null);
+  assert.equal(v.getState().planetIndex, 0);
+  assert.equal(deps.wallet.getBalance(), VOYAGE_COST - 1);
 });
 
-test("claiming before the voyage returns throws NOT_RETURNED", async () => {
-  const deps = createMockDeps({ today: "2026-11-09" });
-  const v = createVoyageModule(deps, { rng: deps.rngMin });
-  await v.init();
-  await v.launch("coastal"); // returns 2026-11-10
-  await assert.rejects(() => v.claim(), (e) => {
-    assert.equal(e.code, VoyageErrorCode.NOT_RETURNED);
-    return true;
-  });
-});
-
-test("claim after return credits reward and archives the voyage", async () => {
-  const deps = createMockDeps({ balance: 300, today: "2026-11-09" });
-  const v = createVoyageModule(deps, { rng: deps.rngMin });
-  await v.init();
-  await v.launch("coastal"); // cost 30 -> 270, returns 2026-11-10
-
-  deps.clock._advanceDays(1); // now 2026-11-10
-  assert.equal((await v.getActive()).returned, true);
-
-  const res = await v.claim();
-  assert.equal(res.reward, COASTAL_MIN);
-  assert.equal(res.balance, 270 + COASTAL_MIN);
-  assert.equal(deps.wallet.getBalance(), 310);
-
-  assert.equal(await v.getActive(), null);
-  const state = v.getState();
-  assert.equal(state.history.length, 1);
-  assert.equal(state.history[0].routeId, "coastal");
-  assert.equal(state.history[0].claimedAt, "2026-11-10");
-});
-
-test("claiming with no active voyage throws", async () => {
-  const v = createVoyageModule(createMockDeps());
-  await v.init();
-  await assert.rejects(() => v.claim(), (e) => {
-    assert.equal(e.code, VoyageErrorCode.NO_ACTIVE_VOYAGE);
-    return true;
-  });
-});
-
-test("a failed launch transaction leaves no active voyage", async () => {
+test("a failed transaction leaves the fridge where it was", async () => {
   const money = createMockWalletWithTransactions(300);
-  const deps = {
+  const v = createVoyageModule({
     wallet: money.wallet,
     transaction: { execute: () => ({ ok: false, balance: 300 }) },
     gameStorage: createMockStorage(),
     clock: createMockClock(),
-  };
-  const v = createVoyageModule(deps, { rng: () => 0 });
+  }, { requirementsMet: READY });
   await v.init();
-  await assert.rejects(() => v.launch("coastal"), (e) => {
+
+  await assert.rejects(() => v.depart(), (e) => {
     assert.equal(e.code, VoyageErrorCode.TRANSACTION_FAILED);
     return true;
   });
-  assert.equal(await v.getActive(), null);
+  assert.equal(v.getState().planetIndex, 0);
 });
 
-test("active voyage persists and reloads across instances", async () => {
+test("departing past the last planet throws NO_NEXT_PLANET", async () => {
+  const deps = createMockDeps({ balance: 300 });
+  const v = createVoyageModule(deps, { requirementsMet: READY });
+  await v.init();
+
+  for (let i = 0; i < DEFAULT_PLANETS.length - 1; i++) await v.depart();
+  assert.equal(v.getState().planetIndex, DEFAULT_PLANETS.length - 1);
+  assert.equal(v.nextPlanet(), null);
+
+  await assert.rejects(() => v.depart(), (e) => {
+    assert.equal(e.code, VoyageErrorCode.NO_NEXT_PLANET);
+    return true;
+  });
+});
+
+test("planet and arrivals persist and reload across instances", async () => {
   const storage = createMockStorage();
   const money = createMockWalletWithTransactions(300);
-  const clock = createMockClock("2026-11-09");
-  const base = () => ({ wallet: money.wallet, transaction: money.transaction, gameStorage: storage, clock });
+  const base = () => ({
+    wallet: money.wallet,
+    transaction: money.transaction,
+    gameStorage: storage,
+    clock: createMockClock("2026-11-11"),
+  });
 
-  const a = createVoyageModule(base(), { rng: () => 0 });
+  const a = createVoyageModule(base(), { requirementsMet: READY });
   await a.init();
-  await a.launch("deep_sea"); // 3 days -> 2026-11-12
+  await a.depart();
 
-  const b = createVoyageModule(base(), { rng: () => 0 });
-  await b.init();
-  const active = await b.getActive();
-  assert.equal(active.routeId, "deep_sea");
-  assert.equal(active.returnsOn, "2026-11-12");
+  const b = createVoyageModule(base(), { requirementsMet: READY });
+  const s = await b.init();
+  assert.equal(s.planetIndex, 1);
+  assert.equal(s.arrivals.length, 1);
+  assert.equal(s.arrivals[0].at, "2026-11-11");
 });
