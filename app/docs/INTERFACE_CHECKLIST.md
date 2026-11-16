@@ -32,6 +32,11 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 | `food.getSnapshot()` | A | B (game) | Proposed |
 | `food.subscribeEvents()` | A | B (game) | Proposed |
 | `infrastructure.applyRepair()` | A | B (game / repair) | Proposed |
+| `food.batchAdded` (event) | A | B (game / income) | Proposed |
+| `food.batchFullyConsumed` (event) | A | B (game / income) | Proposed |
+| `food.batchDiscarded` (event / `cause`) | A | B (game / income) | Proposed |
+| `foodTypeId` (field) | A | B (game) | Proposed |
+| `batchId` (field) | A | B (game) | Proposed |
 
 ---
 
@@ -151,6 +156,86 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 > this best-effort (ignores failures) so it is not yet a hard dependency. Needs
 > A's confirmation before it can be relied on (move to `Agreed`).
 
+## `food.batchAdded` (event)
+
+| Field | Value |
+|---|---|
+| Interface Name | `food.batchAdded` — a food-domain event (delivered via `food.subscribeEvents`) |
+| Owner | A |
+| Used By | B (game / income — entry reward) |
+| Purpose | Fire once when the player logs a **genuinely new** inventory batch, so income credits +4 GP (≤3/day, once per batch). |
+| Parameters | *(proposed)* payload `{ batchId: string, foodTypeId: string, localDate: "YYYY-MM-DD" }` |
+| Return Type | *(proposed)* n/a (event) |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-17 |
+
+> Must fire only for a real new batch — **not** for an edit or a delete-and-re-log
+> of an existing one (see `batchId` and `food.batchDiscarded`). B dedups by
+> `batchId`, so correctness depends on A keeping that id stable.
+
+## `food.batchFullyConsumed` (event)
+
+| Field | Value |
+|---|---|
+| Interface Name | `food.batchFullyConsumed` — a food-domain event |
+| Owner | A |
+| Used By | B (game / income — consume reward, Phase 2B) |
+| Purpose | Fire once when an inventory record is **fully** consumed, so income credits +3 GP (per `foodTypeId` + `localDate`, ≤3 types/day). |
+| Parameters | *(proposed)* payload `{ batchId: string, foodTypeId: string, localDate: "YYYY-MM-DD" }` |
+| Return Type | *(proposed)* n/a (event) |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-17 |
+
+> **Partial** consumption and **discard / spoilage must not** fire this — only a
+> full consume of the record earns GP.
+
+## `food.batchDiscarded` (event / `cause` field)
+
+| Field | Value |
+|---|---|
+| Interface Name | `food.batchDiscarded` (or a `cause` field on a removal event) |
+| Owner | A |
+| Used By | B (game / income) |
+| Purpose | Let B tell "eaten" from "thrown away / deleted / expired" so waste earns no GP. |
+| Parameters | *(proposed)* either a distinct event `{ batchId, foodTypeId, localDate, reason }`, or `cause: "consumed" \| "discarded" \| "expired"` on the removal event |
+| Return Type | *(proposed)* n/a (event) |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-17 |
+
+## `foodTypeId` (field)
+
+| Field | Value |
+|---|---|
+| Interface Name | `foodTypeId` — a field on `food.getSnapshot()` items and on batch events |
+| Owner | A |
+| Used By | B (game / income) |
+| Purpose | A **stable** species identifier, so consume dedup is by real type — never a user-typed name string. |
+| Parameters | *(proposed)* `string`, stable for the life of a food kind |
+| Return Type | *(proposed)* n/a (field) |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-17 |
+
+## `batchId` (field)
+
+| Field | Value |
+|---|---|
+| Interface Name | `batchId` — a field on `food.getSnapshot()` items and on batch events |
+| Owner | A |
+| Used By | B (game / income) |
+| Purpose | A **stable** per-batch identifier for entry dedup + consume tracking / idempotency. |
+| Parameters | *(proposed)* `string`; an edit reuses the same id, and a delete + re-add must not masquerade as a new rewardable batch |
+| Return Type | *(proposed)* n/a (field) |
+| Error Format | *(TBD — to be agreed)* |
+| Status | Proposed |
+| Last Updated | 2026-11-17 |
+
+> Proposed by B on 2026-11-17 (Phase 0 review / Phase 2A). None are `Agreed`; A
+> must confirm shape and semantics before B can rely on any of them.
+
 ---
 
 ## How to add or change an entry
@@ -170,3 +255,25 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 - Before moving to Agreed, record the owner and consumer confirmations, date, and PR/discussion link. Before moving to Implemented or Tested, record the implementation path and relevant test command/results.
 - Existing website code was searched for these interfaces and equivalent responsibilities. Its internal `save()` only persists `frigoFridgeTune` presentation settings; it is not the proposed game storage service.
 - Day 1 adds documentation and tracked empty directories only. No game implementation or executable game test suite is introduced. Website files and assets remain unchanged from the main baseline.
+
+## Cross-module risks (high priority)
+
+Recorded 2026-11-17 (Phase 0 review, confirmed Phase 2A). **Not yet mitigated — to resolve with A.**
+
+1. **Non-atomic debit / reward / save.** Game modules settle one player action as
+   separate awaited calls — `transaction.execute` (debit and/or credit) then
+   `gameStorage.save` — with no atomic wrapper. If the save (or a second credit)
+   fails *after* a debit lands, GP is spent but the result is unrecorded /
+   uncredited (a lost-action window). Affects every spend+persist flow
+   (exploration dig, repair buy, detector repair, voyage depart, income credits).
+   Closing it needs A's **atomic write** (or an outbox / transaction id). Do not
+   fake atomicity with two independent writes.
+
+2. **Duplicate-submission idempotency.** The same user action delivered twice
+   (double tap, retried event) is guarded only per module / per in-process call;
+   there is no shared request / idempotency key at the transaction layer. Current
+   tests prove *per-call* exactly-once settlement — they do **not** prove
+   cross-delivery idempotency, so this is **not** considered solved. Income's
+   entry path now dedups by `batchId`; spend actions (dig, buy, depart) rely on
+   the wallet rejecting an over-spend. Needs an A-side **idempotency key** on
+   `transaction.execute`.
