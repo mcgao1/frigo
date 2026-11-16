@@ -141,3 +141,122 @@ test("a failed credit transaction throws TRANSACTION_FAILED", async () => {
     return true;
   });
 });
+
+// --- Phase 2A: entry reward dedup by batchId ------------------------------
+
+test("recordEntry rewards once per batchId; a duplicate delivery is ignored", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  let r = await inc.recordEntry("batch-1");
+  assert.equal(r.credited, true);
+  assert.equal(r.amount, ENTRY_GP);
+  assert.equal(r.batchId, "batch-1");
+  assert.equal(r.entriesToday, 1);
+
+  r = await inc.recordEntry("batch-1"); // same batch delivered again, same day
+  assert.equal(r.credited, false);
+  assert.equal(r.reason, "DUPLICATE_BATCH");
+  assert.equal(deps.wallet.getBalance(), ENTRY_GP); // no second +4
+  assert.equal(inc.getSnapshot().entries, 1);       // the daily slot was not re-consumed
+  assert.equal(inc.getSnapshot().entryBatchCount, 1);
+});
+
+test("the daily cap counts rewarded batches; a duplicate does not consume a slot", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  await inc.recordEntry("b1");
+  await inc.recordEntry("b2");
+  await inc.recordEntry("b3"); // ENTRY_CAP (3) reached
+  assert.equal(inc.getSnapshot().entries, ENTRY_CAP);
+
+  let r = await inc.recordEntry("b1"); // duplicate of a rewarded batch
+  assert.equal(r.reason, "DUPLICATE_BATCH"); // distinguished from the cap
+
+  r = await inc.recordEntry("b4"); // a genuinely new batch, over today's cap
+  assert.equal(r.reason, "DAILY_CAP");
+  assert.equal(deps.wallet.getBalance(), ENTRY_GP * ENTRY_CAP);
+});
+
+test("a batchId cannot earn again after the day rolls over", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  assert.equal((await inc.recordEntry("keep-1")).credited, true);
+  deps.clock._advanceDays(1);
+  const r = await inc.recordEntry("keep-1"); // new day, cap free, but same batch
+  assert.equal(r.credited, false);
+  assert.equal(r.reason, "DUPLICATE_BATCH");
+  assert.equal(deps.wallet.getBalance(), ENTRY_GP); // still only the one +4
+});
+
+test("a new day resets the daily cap for NEW batchIds", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  await inc.recordEntry("d1-a");
+  await inc.recordEntry("d1-b");
+  await inc.recordEntry("d1-c"); // day 1 cap reached
+  assert.equal((await inc.recordEntry("d1-d")).reason, "DAILY_CAP");
+
+  deps.clock._advanceDays(1);
+  const r = await inc.recordEntry("d2-a"); // new day, new batch
+  assert.equal(r.credited, true);
+  assert.equal(r.entriesToday, 1);
+  assert.equal(deps.wallet.getBalance(), ENTRY_GP * (ENTRY_CAP + 1));
+});
+
+test("rewarded batchIds persist across re-init: a reload cannot re-earn", async () => {
+  const storage = createMockStorage();
+  const money = createMockWalletWithTransactions(0);
+  const clock = createMockClock("2026-11-09");
+  const base = () => ({ transaction: money.transaction, gameStorage: storage, clock });
+
+  const a = createIncomeModule(base());
+  await a.init();
+  await a.recordEntry("persist-1"); // +4
+  assert.equal(money.getBalance(), ENTRY_GP);
+
+  const b = createIncomeModule(base());
+  const snap = await b.init();
+  assert.equal(snap.entryBatchCount, 1);
+  assert.equal(b.hasEntryBatch("persist-1"), true);
+
+  const r = await b.recordEntry("persist-1"); // same batch after a reload
+  assert.equal(r.credited, false);
+  assert.equal(r.reason, "DUPLICATE_BATCH");
+  assert.equal(money.getBalance(), ENTRY_GP); // unchanged
+});
+
+test("a failed entry credit does not record the batchId (retryable, no double-charge)", async () => {
+  let calls = 0;
+  let bal = 0;
+  const transaction = {
+    execute: ({ amount }) => {
+      calls += 1;
+      if (calls === 1) return { ok: false, balance: bal }; // first attempt fails
+      bal += amount;
+      return { ok: true, balance: bal };
+    },
+  };
+  const inc = createIncomeModule({ transaction, gameStorage: createMockStorage(), clock: createMockClock("2026-11-09") });
+  await inc.init();
+
+  await assert.rejects(() => inc.recordEntry("b1"), (e) => {
+    assert.equal(e.code, IncomeErrorCode.TRANSACTION_FAILED);
+    return true;
+  });
+  assert.equal(inc.hasEntryBatch("b1"), false); // not recorded
+  assert.equal(inc.getSnapshot().entries, 0);   // slot not consumed
+
+  const r = await inc.recordEntry("b1"); // retry now succeeds, earns its single reward
+  assert.equal(r.credited, true);
+  assert.equal(r.amount, ENTRY_GP);
+  assert.equal(inc.hasEntryBatch("b1"), true);
+  assert.equal(inc.getSnapshot().entries, 1);
+});
