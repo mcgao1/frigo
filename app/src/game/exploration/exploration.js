@@ -50,14 +50,25 @@ export const DEFAULT_JUNK = [
 ];
 
 /**
- * Weighted loot table. Weights are relative; `gp` entries also carry an inclusive
- * refund range. Average GP back ≈ 0.20 × 5.5 ≈ 1.1 per 5 GP dig (a net sink).
+ * Weighted loot table (relative weights; here they sum to 100). A `gp` entry
+ * carries `tiers` — a second weighted table for the refund amount. LOCKED
+ * 2026-11-16: Junk&Oddities 65 / Tips 15 / Recipes 10 / GP 10; GP tiers
+ * +3 (60%) / +6 (30%) / +12 (10%). Average GP back ≈ 0.10 × (3·0.6 + 6·0.3 +
+ * 12·0.1) = 0.10 × 4.8 = 0.48 per 5 GP dig — a deep net sink.
  */
 export const DEFAULT_LOOT = [
-  { type: "junk", weight: 30 },
-  { type: "tip", weight: 28 },
-  { type: "recipe", weight: 22 },
-  { type: "gp", weight: 20, gp: { min: 3, max: 8 } },
+  { type: "junk", weight: 65 },
+  { type: "tip", weight: 15 },
+  { type: "recipe", weight: 10 },
+  {
+    type: "gp",
+    weight: 10,
+    tiers: [
+      { gp: 3, weight: 60 },
+      { gp: 6, weight: 30 },
+      { gp: 12, weight: 10 },
+    ],
+  },
 ];
 
 export const ExplorationErrorCode = Object.freeze({
@@ -139,9 +150,15 @@ export function createExplorationModule(deps, options = {}) {
       if ((x -= e.weight) < 0) { bucket = e; break; }
     }
     if (bucket.type === "gp") {
-      const { min, max } = bucket.gp ?? { min: 0, max: 0 };
-      const amount = min + Math.floor(random() * (max - min + 1));
-      return { type: "gp", gp: amount };
+      // Second weighted draw over the GP sub-tiers (+3 / +6 / +12).
+      const tiers = bucket.tiers ?? [{ gp: 0, weight: 1 }];
+      const tTotal = tiers.reduce((s, t) => s + t.weight, 0);
+      let y = random() * tTotal;
+      let tier = tiers[tiers.length - 1];
+      for (const t of tiers) {
+        if ((y -= t.weight) < 0) { tier = t; break; }
+      }
+      return { type: "gp", gp: tier.gp };
     }
     const pool = bucket.type === "recipe" ? recipes : bucket.type === "tip" ? tips : junk;
     const have = bucket.type === "recipe" ? state.recipes : bucket.type === "tip" ? state.tips : [];
