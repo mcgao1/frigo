@@ -38,24 +38,24 @@ test("openDay credits once per distinct day, and resets after the day rolls", as
   assert.ok(deps.ledger.every((l) => l.reason === "income:daily"));
 });
 
-test("recordEntry pays up to the daily cap, then stops (no penalty), resets next day", async () => {
+test("recordEntry pays up to the daily cap, then stops (cap_exceeded), resets next day", async () => {
   const deps = createMockDeps();
   const inc = createIncomeModule(deps);
   await inc.init();
 
   for (let i = 0; i < ENTRY_CAP; i++) {
-    const r = await inc.recordEntry();
+    const r = await inc.recordEntry(`d1-${i}`);
     assert.equal(r.credited, true);
     assert.equal(r.entriesToday, i + 1);
   }
-  let r = await inc.recordEntry();
+  let r = await inc.recordEntry("d1-over");
   assert.equal(r.credited, false);
-  assert.equal(r.reason, "DAILY_CAP");
+  assert.equal(r.reason, "CAP_EXCEEDED");
   assert.equal(deps.wallet.getBalance(), ENTRY_GP * ENTRY_CAP);
   assert.equal(deps.ledger[0].reason, "income:entry");
 
   deps.clock._advanceDays(1);
-  r = await inc.recordEntry();
+  r = await inc.recordEntry("d2-fresh");
   assert.equal(r.credited, true);
   assert.equal(r.entriesToday, 1);
 });
@@ -99,11 +99,11 @@ test("GP only increases: caps yield no credit but never debit", async () => {
   const deps = createMockDeps({ balance: 7 });
   const inc = createIncomeModule(deps);
   await inc.init();
-  await inc.recordEntry();            // +4 -> 11
-  await inc.recordEntry();            // +4 -> 15
-  await inc.recordEntry();            // +4 -> 19
+  await inc.recordEntry("g1");            // +4 -> 11
+  await inc.recordEntry("g2");            // +4 -> 15
+  await inc.recordEntry("g3");            // +4 -> 19
   const before = deps.wallet.getBalance();
-  const r = await inc.recordEntry();  // capped
+  const r = await inc.recordEntry("g4");  // over cap -> cap_exceeded, no credit
   assert.equal(r.credited, false);
   assert.equal(deps.wallet.getBalance(), before); // unchanged, not reduced
 });
@@ -117,7 +117,7 @@ test("state persists and reloads; same-day claims stay claimed after reload", as
   const a = createIncomeModule(base());
   await a.init();
   await a.openDay();          // +5
-  await a.recordEntry();      // +4
+  await a.recordEntry("persist-entry"); // +4
   await a.recordConsume("dairy"); // +3
 
   const b = createIncomeModule(base());
@@ -177,7 +177,8 @@ test("the daily cap counts rewarded batches; a duplicate does not consume a slot
   assert.equal(r.reason, "DUPLICATE_BATCH"); // distinguished from the cap
 
   r = await inc.recordEntry("b4"); // a genuinely new batch, over today's cap
-  assert.equal(r.reason, "DAILY_CAP");
+  assert.equal(r.reason, "CAP_EXCEEDED");
+  assert.equal(inc.entryBatchStatus("b4"), "cap_exceeded");
   assert.equal(deps.wallet.getBalance(), ENTRY_GP * ENTRY_CAP);
 });
 
@@ -202,7 +203,7 @@ test("a new day resets the daily cap for NEW batchIds", async () => {
   await inc.recordEntry("d1-a");
   await inc.recordEntry("d1-b");
   await inc.recordEntry("d1-c"); // day 1 cap reached
-  assert.equal((await inc.recordEntry("d1-d")).reason, "DAILY_CAP");
+  assert.equal((await inc.recordEntry("d1-d")).reason, "CAP_EXCEEDED");
 
   deps.clock._advanceDays(1);
   const r = await inc.recordEntry("d2-a"); // new day, new batch
@@ -259,4 +260,64 @@ test("a failed entry credit does not record the batchId (retryable, no double-ch
   assert.equal(r.amount, ENTRY_GP);
   assert.equal(inc.hasEntryBatch("b1"), true);
   assert.equal(inc.getSnapshot().entries, 1);
+});
+
+// --- Phase 2A follow-up: cap_exceeded is terminal; batchId is required -----
+
+test("a cap_exceeded batch can never be back-paid, even re-delivered on a later day", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  await inc.recordEntry("f1");
+  await inc.recordEntry("f2");
+  await inc.recordEntry("f3");             // day-1 cap full
+  let r = await inc.recordEntry("over-1"); // 4th new batch today -> burned
+  assert.equal(r.reason, "CAP_EXCEEDED");
+  assert.equal(inc.entryBatchStatus("over-1"), "cap_exceeded");
+
+  deps.clock._advanceDays(1);              // next day, the daily cap is free again
+  r = await inc.recordEntry("over-1");     // same burned batch re-delivered
+  assert.equal(r.credited, false);
+  assert.equal(r.reason, "CAP_EXCEEDED");  // still burned — no back-pay
+  assert.equal(deps.wallet.getBalance(), ENTRY_GP * ENTRY_CAP); // only the 3 day-1 rewards
+
+  r = await inc.recordEntry("day2-new");   // a genuinely new batch still earns
+  assert.equal(r.credited, true);
+});
+
+test("recordEntry requires a stable batchId (no auto-generated id)", async () => {
+  const inc = createIncomeModule(createMockDeps());
+  await inc.init();
+  for (const bad of [undefined, null, "", "   "]) {
+    await assert.rejects(() => inc.recordEntry(bad), (e) => {
+      assert.equal(e.code, IncomeErrorCode.MISSING_BATCH_ID);
+      return true;
+    });
+  }
+  assert.equal(inc.getSnapshot().entries, 0);
+  assert.equal(inc.getSnapshot().entryBatchCount, 0);
+});
+
+test("cap_exceeded status persists across re-init: a reload cannot back-pay it", async () => {
+  const storage = createMockStorage();
+  const money = createMockWalletWithTransactions(0);
+  const clock = createMockClock("2026-11-09");
+  const base = () => ({ transaction: money.transaction, gameStorage: storage, clock });
+
+  const a = createIncomeModule(base());
+  await a.init();
+  await a.recordEntry("c1");
+  await a.recordEntry("c2");
+  await a.recordEntry("c3");                 // cap full
+  assert.equal((await a.recordEntry("c-over")).reason, "CAP_EXCEEDED");
+  assert.equal(money.getBalance(), ENTRY_GP * ENTRY_CAP);
+
+  const b = createIncomeModule(base());
+  await b.init();
+  assert.equal(b.entryBatchStatus("c-over"), "cap_exceeded"); // survived the reload
+  const r = await b.recordEntry("c-over");   // re-delivered after a reload
+  assert.equal(r.credited, false);
+  assert.equal(r.reason, "CAP_EXCEEDED");
+  assert.equal(money.getBalance(), ENTRY_GP * ENTRY_CAP); // unchanged
 });

@@ -7,9 +7,12 @@
  * caps / dedup and credits GP through the transaction port:
  *
  *   • openDay()            +DAILY_OPEN GP, once per distinct local day.
- *   • recordEntry(batchId) +ENTRY GP per logged batch, up to ENTRY_CAP per day;
- *                          each batchId earns at most once EVER (dedup across
- *                          days / reloads / re-delivered "added" events).
+ *   • recordEntry(batchId) +ENTRY GP per logged batch, up to ENTRY_CAP per day.
+ *                          batchId is REQUIRED (a stable id from A). Each batchId
+ *                          is resolved at most once EVER: it either earns once,
+ *                          or — if it arrives after the day's cap — is burned as
+ *                          `cap_exceeded` and can never earn, across days,
+ *                          reloads, or re-delivered "added" events.
  *   • recordConsume(cat)   +CONSUME GP per category consumed, each category once
  *                          per day, up to CONSUME_CAP categories per day.
  *
@@ -37,6 +40,7 @@ export const CONSUME_CAP = 3;
 
 export const IncomeErrorCode = Object.freeze({
   TRANSACTION_FAILED: "TRANSACTION_FAILED",
+  MISSING_BATCH_ID: "MISSING_BATCH_ID",
 });
 
 export class IncomeError extends Error {
@@ -58,6 +62,22 @@ function toISODate(value) {
 function normCategory(value) {
   const s = String(value ?? "").trim().toLowerCase();
   return s || "uncategorized";
+}
+
+/**
+ * Load the persisted entry-batch ledger into `{ batchId: "rewarded" |
+ * "cap_exceeded" }`, tolerating the older array-of-rewarded-ids format.
+ */
+function normalizeEntryBatches(value) {
+  const out = {};
+  if (Array.isArray(value)) {
+    for (const id of value) out[String(id)] = "rewarded";
+  } else if (value && typeof value === "object") {
+    for (const [id, status] of Object.entries(value)) {
+      out[String(id)] = status === "cap_exceeded" ? "cap_exceeded" : "rewarded";
+    }
+  }
+  return out;
 }
 
 /**
@@ -88,13 +108,14 @@ export function createIncomeModule(deps, options = {}) {
 
   /**
    * @type {{ lastOpenDate: string|null, day: string|null, entries: number,
-   *          entryBatches: string[], categories: string[], earned: number }}
-   * `entryBatches` is the lifetime set of batchIds that have already earned an
-   * entry reward — persisted, so a batch can never earn twice (across days,
-   * reloads, or re-delivered "added" events).
+   *          entryBatches: Record<string, "rewarded"|"cap_exceeded">,
+   *          categories: string[], earned: number }}
+   * `entryBatches` is the lifetime ledger of resolved entry batchIds: "rewarded"
+   * (earned its single +entry) or "cap_exceeded" (arrived past the daily cap and
+   * burned). Either status blocks any future reward — across days, reloads, or
+   * re-delivered "added" events. Persisted.
    */
-  let state = { lastOpenDate: null, day: null, entries: 0, entryBatches: [], categories: [], earned: 0 };
-  let anonSeq = 0;
+  let state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, categories: [], earned: 0 };
 
   async function persist() {
     await gameStorage.save({ key: storageKey, ...state });
@@ -111,12 +132,12 @@ export function createIncomeModule(deps, options = {}) {
         lastOpenDate: loaded.lastOpenDate ?? null,
         day: loaded.day ?? null,
         entries: Number.isFinite(loaded.entries) ? loaded.entries : 0,
-        entryBatches: Array.isArray(loaded.entryBatches) ? [...loaded.entryBatches] : [],
+        entryBatches: normalizeEntryBatches(loaded.entryBatches),
         categories: Array.isArray(loaded.categories) ? [...loaded.categories] : [],
         earned: Number.isFinite(loaded.earned) ? loaded.earned : 0,
       };
     } else {
-      state = { lastOpenDate: null, day: null, entries: 0, entryBatches: [], categories: [], earned: 0 };
+      state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, categories: [], earned: 0 };
     }
     return getSnapshot();
   }
@@ -156,40 +177,55 @@ export function createIncomeModule(deps, options = {}) {
 
   /**
    * A valid new batch was logged into the fridge: +entry GP, up to entryCap per
-   * day, and at most once per `batchId` EVER. A missing batchId gets a synthetic
-   * unique id (a manual sandbox tap always counts as a fresh batch).
+   * day, and each `batchId` is resolved at most once EVER.
    *
-   * Dedup is by batchId only, so the same batch re-delivered (same day, next
-   * day, after a reload, or a duplicate event) never earns twice. Catching an
-   * edit / delete-and-re-log depends on A reusing the batch's stable id — see the
-   * Proposed `food.batchAdded` / `batchId` interface (A owns batch identity).
-   * @param {string} [batchId]
+   * `batchId` is REQUIRED and must be a stable id supplied by A — there is no
+   * auto-generated fallback (a missing id throws MISSING_BATCH_ID). A test tool /
+   * sandbox must mint its own unique ids.
+   *
+   * Resolution is terminal and persisted: a batch becomes "rewarded" (earned its
+   * single +entry) or, if it arrives after the day's cap is full, "cap_exceeded"
+   * (burned — never earns, even re-delivered on a later day). Either way a
+   * re-delivery (same day, next day, after a reload, or a duplicate event) never
+   * earns again. Catching an edit / delete-and-re-log depends on A reusing the
+   * batch's stable id — see the Proposed `food.batchAdded` / `batchId` interface.
+   * @param {string} batchId
    */
   async function recordEntry(batchId) {
-    const id = batchId != null && String(batchId).trim() !== ""
-      ? String(batchId)
-      : `anon-${Date.now()}-${++anonSeq}`;
+    if (batchId == null || String(batchId).trim() === "") {
+      throw new IncomeError(IncomeErrorCode.MISSING_BATCH_ID, "recordEntry requires a stable batchId", { batchId });
+    }
+    const id = String(batchId);
     const todayISO = await today();
     rollDay(todayISO);
 
-    // Lifetime dedup first: an already-rewarded batch never pays again and does
-    // not consume a daily slot, whatever day it is re-delivered on.
-    if (state.entryBatches.includes(id)) {
+    // Already resolved? Never pays again, and does not consume a daily slot,
+    // whatever day it is re-delivered on.
+    const prior = state.entryBatches[id];
+    if (prior === "rewarded") {
       await persist();
-      return { credited: false, reason: "DUPLICATE_BATCH", amount: 0, batchId: id, entriesToday: state.entries, cap: rates.entryCap };
+      return { credited: false, reason: "DUPLICATE_BATCH", amount: 0, batchId: id, status: prior, entriesToday: state.entries, cap: rates.entryCap };
     }
-    if (state.entries >= rates.entryCap) {
+    if (prior === "cap_exceeded") {
       await persist();
-      return { credited: false, reason: "DAILY_CAP", amount: 0, batchId: id, entriesToday: state.entries, cap: rates.entryCap };
+      return { credited: false, reason: "CAP_EXCEEDED", amount: 0, batchId: id, status: prior, entriesToday: state.entries, cap: rates.entryCap };
+    }
+
+    // First time we see this batch, but the day's cap is already full: burn it
+    // permanently so it can never be back-paid on a later day.
+    if (state.entries >= rates.entryCap) {
+      state.entryBatches[id] = "cap_exceeded";
+      await persist();
+      return { credited: false, reason: "CAP_EXCEEDED", amount: 0, batchId: id, status: "cap_exceeded", entriesToday: state.entries, cap: rates.entryCap };
     }
 
     // credit() throws on a wallet failure BEFORE we record anything, so a failed
-    // reward leaves the batch unrecorded and retryable (no double-charge).
+    // reward leaves the batch unresolved and retryable (no double-charge, no burn).
     const result = await credit(rates.entry, "income:entry");
     state.entries += 1;
-    state.entryBatches.push(id);
+    state.entryBatches[id] = "rewarded";
     await persist();
-    return { credited: true, amount: rates.entry, balance: result.balance, batchId: id, entriesToday: state.entries, cap: rates.entryCap };
+    return { credited: true, amount: rates.entry, balance: result.balance, batchId: id, status: "rewarded", entriesToday: state.entries, cap: rates.entryCap };
   }
 
   /**
@@ -221,7 +257,7 @@ export function createIncomeModule(deps, options = {}) {
       lastOpenDate: state.lastOpenDate,
       day: state.day,
       entries: state.entries,
-      entryBatchCount: state.entryBatches.length,
+      entryBatchCount: Object.keys(state.entryBatches).length,
       categories: [...state.categories],
       earned: state.earned,
       rates: { ...rates },
@@ -233,10 +269,14 @@ export function createIncomeModule(deps, options = {}) {
     return state.earned;
   }
 
-  /** Has this batchId already earned an entry reward? (lifetime dedup check) */
+  /** This batch's lifetime entry status: "rewarded" | "cap_exceeded" | null. */
+  function entryBatchStatus(batchId) {
+    return state.entryBatches[String(batchId)] ?? null;
+  }
+  /** Has this batchId already been resolved (rewarded or cap_exceeded)? */
   function hasEntryBatch(batchId) {
-    return state.entryBatches.includes(String(batchId));
+    return entryBatchStatus(batchId) !== null;
   }
 
-  return { init, openDay, recordEntry, recordConsume, getSnapshot, getEarned, hasEntryBatch, storageKey };
+  return { init, openDay, recordEntry, recordConsume, getSnapshot, getEarned, hasEntryBatch, entryBatchStatus, storageKey };
 }
