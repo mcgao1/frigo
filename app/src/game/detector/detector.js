@@ -4,14 +4,23 @@
  * The freshness detector is a MAINLINE beat, not a shop upgrade. It is acquired
  * in three steps:
  *   1. USE DAYS — every day the player actually uses the app counts as one
- *      "valid use day" (B derives this from the clock; distinct dates only).
- *      On the 3rd valid use day the detector becomes diggable (the game fires a
- *      letter at the same moment — that wiring lives outside this module).
- *   2. DIG — the player digs the buried detector up next to the fridge. Free.
+ *      "valid use day" (B derives this from the clock; distinct dates only, so
+ *      the three days need NOT be consecutive). On the 3rd valid use day the
+ *      detector becomes diggable (the game fires a letter at the same moment —
+ *      that wiring lives outside this module).
+ *   2. DIG — the player digs next to the fridge. Free: no Digging Layer, no loot
+ *      RNG. The buried detector is GUARANTEED found on the `digsToFind`-th (3rd)
+ *      valid dig — never earlier, never by chance.
  *   3. REPAIR — the dug-up detector is broken; repairing it costs a flat
- *      `repairCost` GP. Only a repaired detector can SCAN the food.
+ *      `repairCost` GP (charged once). Only a repaired detector can SCAN the food.
  *
- * Acquisition state (use days, found, repaired) and the last scan are persisted.
+ * Each milestone raises a one-shot signal (`justReady` / `justFound` /
+ * `justRepaired`, with the matching `DETECTOR_FLAGS` string) for the Fri letters
+ * / story. These reuse the existing `letters.trigger(flag)` / `story.trigger(flag)`
+ * interface — this module does NOT build a second event system.
+ *
+ * Acquisition state (use days, dig progress, found, repaired) and the last scan
+ * are persisted; a reload / re-init restores them exactly.
  *
  * Game-side logic only. A's domains are reached strictly through the injected
  * ports in ./ports.js — detector never imports food / economy / infrastructure.
@@ -27,6 +36,25 @@ export const DETECTOR_USE_DAYS = 3;
 
 /** Flat GP cost to repair the dug-up detector. */
 export const DETECTOR_REPAIR_COST = 10;
+
+/** Valid free digs required before the buried detector is guaranteed found. */
+export const DETECTOR_DIG_COUNT = 3;
+
+/**
+ * Canonical one-shot flags the detector raises at each mainline milestone,
+ * reserved for the Fri letters / story. The app routes them to
+ * `letters.trigger(flag)` / `story.trigger(flag)` — the SAME flag interface the
+ * "guild" letter already uses for `voyage:complete`. Do NOT add a parallel event
+ * system; a letter gates on these the usual way (`requires: ["detector:found"]`).
+ *   • READY    — 3rd valid use day: the detector becomes diggable.
+ *   • FOUND    — 3rd valid dig: the detector is dug up.
+ *   • REPAIRED — the detector is repaired and can scan.
+ */
+export const DETECTOR_FLAGS = Object.freeze({
+  READY: "detector:ready",
+  FOUND: "detector:found",
+  REPAIRED: "detector:repaired",
+});
 
 /** What a repaired detector reveals per item. (Single tier — no paid levels.) */
 export const DEFAULT_REVEALS = ["status", "daysLeft"];
@@ -83,8 +111,8 @@ function statusOf(freshness, daysLeft) {
 
 /**
  * @param {DetectorDeps} deps
- * @param {{ storageKey?: string, useDaysToDig?: number, repairCost?: number,
- *           reveals?: string[] }} [options]
+ * @param {{ storageKey?: string, useDaysToDig?: number, digsToFind?: number,
+ *           repairCost?: number, reveals?: string[] }} [options]
  */
 export function createDetectorModule(deps, options = {}) {
   const { food, gameStorage, clock, wallet, transaction } = deps ?? {};
@@ -100,11 +128,12 @@ export function createDetectorModule(deps, options = {}) {
 
   const storageKey = options.storageKey ?? DEFAULT_STORAGE_KEY;
   const threshold = options.useDaysToDig ?? DETECTOR_USE_DAYS;
+  const digsToFind = options.digsToFind ?? DETECTOR_DIG_COUNT;
   const repairCost = options.repairCost ?? DETECTOR_REPAIR_COST;
   const reveals = new Set(options.reveals ?? DEFAULT_REVEALS);
 
-  /** @type {{ useDayCount: number, lastUseDate: string|null, foundAt: string|null, repairedAt: string|null }} */
-  let state = { useDayCount: 0, lastUseDate: null, foundAt: null, repairedAt: null };
+  /** @type {{ useDayCount: number, lastUseDate: string|null, digCount: number, foundAt: string|null, repairedAt: string|null }} */
+  let state = { useDayCount: 0, lastUseDate: null, digCount: 0, foundAt: null, repairedAt: null };
   /** @type {null | { at: string | null, readings: object[] }} */
   let lastScan = null;
   let unsubscribe = null;
@@ -125,6 +154,7 @@ export function createDetectorModule(deps, options = {}) {
       state = {
         useDayCount: Number.isFinite(loaded.useDayCount) ? loaded.useDayCount : 0,
         lastUseDate: loaded.lastUseDate ?? null,
+        digCount: Number.isFinite(loaded.digCount) ? loaded.digCount : 0,
         foundAt: loaded.foundAt ?? null,
         repairedAt: loaded.repairedAt ?? null,
       };
@@ -144,13 +174,24 @@ export function createDetectorModule(deps, options = {}) {
   const isRepaired = () => Boolean(state.repairedAt);
   const isDigReady = () => state.useDayCount >= threshold && !isFound();
 
+  /** Coarse mainline phase — reserved for letters/story gating + UI. */
+  function phaseOf() {
+    if (isRepaired()) return "repaired";
+    if (isFound()) return "found";
+    if (state.useDayCount >= threshold) return "ready";
+    return "locked";
+  }
+
   function progressOf(extra = {}) {
     return {
       useDays: state.useDayCount,
       threshold,
+      digs: state.digCount,
+      digsToFind,
       found: isFound(),
       repaired: isRepaired(),
       digReady: isDigReady(),
+      phase: phaseOf(),
       complete: isRepaired(),
       repairCost,
       ...extra,
@@ -167,19 +208,34 @@ export function createDetectorModule(deps, options = {}) {
   async function recordUseDay(dateOverride) {
     const todayISO = toISODate(dateOverride ?? (await clock.getLocalDate()));
     const wasReady = state.useDayCount >= threshold;
-    if (todayISO && todayISO !== state.lastUseDate) {
+    // Count a day only when it is strictly later than the last counted one, so a
+    // same-day repeat — or a replayed / out-of-order earlier date — never inflates
+    // the tally. Distinct ISO dates compare correctly as strings.
+    if (todayISO && (state.lastUseDate == null || todayISO > state.lastUseDate)) {
       state.lastUseDate = todayISO;
       state.useDayCount += 1;
       await persist();
     }
     const nowReady = state.useDayCount >= threshold;
-    return progressOf({ justReady: !wasReady && nowReady && !isFound() });
+    const justReady = !wasReady && nowReady && !isFound();
+    return progressOf({ justReady, flag: justReady ? DETECTOR_FLAGS.READY : null });
   }
 
-  /** Dig the buried detector up next to the fridge (free). */
+  /**
+   * Dig at the buried detector (free — never touches the Digging Layer or its
+   * loot RNG). Each valid dig advances `digCount`, persisted every time. The
+   * detector is GUARANTEED found on the `digsToFind`-th (3rd) valid dig — not
+   * before, and not by chance. A dig once it is found throws `ALREADY_FOUND` and
+   * changes nothing (no extra find, no reward).
+   *
+   * Returns `found` (true only on the finding dig), `digs` / `digsToFind`
+   * progress, and — on the finding dig — `justFound: true` + the `FOUND` flag
+   * for the letters / story wiring to raise exactly once.
+   * @param {string|Date} [dateOverride]
+   */
   async function dig(dateOverride) {
     if (isFound()) {
-      throw new DetectorError(DetectorErrorCode.ALREADY_FOUND, "Detector already dug up", {});
+      throw new DetectorError(DetectorErrorCode.ALREADY_FOUND, "Detector already dug up", { digs: state.digCount });
     }
     if (state.useDayCount < threshold) {
       throw new DetectorError(
@@ -188,9 +244,15 @@ export function createDetectorModule(deps, options = {}) {
         { useDays: state.useDayCount, threshold },
       );
     }
-    state.foundAt = toISODate(dateOverride ?? (await clock.getLocalDate()));
+
+    state.digCount += 1;
+    if (state.digCount >= digsToFind) {
+      state.foundAt = toISODate(dateOverride ?? (await clock.getLocalDate()));
+      await persist();
+      return { ok: true, found: true, foundAt: state.foundAt, digs: state.digCount, digsToFind, justFound: true, flag: DETECTOR_FLAGS.FOUND };
+    }
     await persist();
-    return { ok: true, foundAt: state.foundAt };
+    return { ok: true, found: false, digs: state.digCount, digsToFind, remaining: digsToFind - state.digCount, justFound: false, flag: null };
   }
 
   /** Repair the dug-up detector (costs `repairCost` GP). */
@@ -221,7 +283,7 @@ export function createDetectorModule(deps, options = {}) {
 
     state.repairedAt = toISODate(await clock.getLocalDate());
     await persist();
-    return { ok: true, balance: result.balance, repairedAt: state.repairedAt };
+    return { ok: true, balance: result.balance, repairedAt: state.repairedAt, justRepaired: true, flag: DETECTOR_FLAGS.REPAIRED };
   }
 
   function readItem(item, todayISO) {
@@ -257,6 +319,9 @@ export function createDetectorModule(deps, options = {}) {
   function getUseDays() {
     return state.useDayCount;
   }
+  function getDigs() {
+    return state.digCount;
+  }
   function isStale() {
     return stale;
   }
@@ -272,8 +337,8 @@ export function createDetectorModule(deps, options = {}) {
 
   return {
     init, recordUseDay, dig, repair, scan,
-    getProgress, getUseDays, getLastScan, isStale,
+    getProgress, getUseDays, getDigs, getLastScan, isStale,
     isFound, isRepaired, isDigReady, dispose,
-    repairCost, threshold, storageKey,
+    repairCost, threshold, digsToFind, storageKey,
   };
 }
