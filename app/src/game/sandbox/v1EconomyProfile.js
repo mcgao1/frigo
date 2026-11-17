@@ -19,12 +19,10 @@
  * fri-frostpeak-clue) are kept verbatim — already gift 0 — so their trigger and
  * read behavior is byte-for-byte unaffected.
  *
- * NOTE (documented, not a blocker): collection.claimSet always calls
- * transaction.execute, so claiming a reward-0 set writes a 0-amount
- * `collection:set:*` ledger line. It injects 0 GP (balance unchanged), so the
- * economy stays isolated; only the ledger carries a harmless zero entry. Removing
- * that line would require a one-line guard in collection.js (a business-module
- * change), so it is left for the user to approve separately.
+ * NOTE: a reward-0 collection claim writes NO wallet transaction and NO ledger
+ * line — collection.claimSet skips transaction.execute when reward <= 0 (fixed
+ * 2026-11-17 with the user's approval). A V1 run's ledger therefore carries only
+ * real income + mainline entries.
  */
 import { DEFAULT_SETS } from "../collection/collection.js";
 import { DEFAULT_CHAPTERS } from "../story/story.js";

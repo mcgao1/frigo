@@ -123,6 +123,48 @@ test("claiming without a transaction dep is unavailable", async () => {
   });
 });
 
+test("a reward-0 set claim completes without any wallet transaction or ledger line", async () => {
+  const deps = createMockDeps({ items: DAIRY_ITEMS, balance: 50 });
+  const c = createCollectionModule(deps, { sets: [{ id: "dairy", name: "Dairy", reward: 0 }] });
+  await c.init();
+  await c.sync();
+
+  const res = await c.claimSet("dairy");
+  assert.equal(res.reward, 0);
+  assert.equal(deps.wallet.getBalance(), 50); // balance untouched
+  assert.equal(deps.ledger.length, 0); // NO 0-amount collection:set ledger entry
+  assert.ok(c.getProgress().claimedSets.includes("dairy")); // claim still completed
+  await assert.rejects(() => c.claimSet("dairy"), (e) => {
+    assert.equal(e.code, CollectionErrorCode.ALREADY_CLAIMED); // and is one-shot
+    return true;
+  });
+});
+
+test("a reward-0 set can be claimed even without a transaction dep", async () => {
+  const c = createCollectionModule(
+    { food: createMockFood(DAIRY_ITEMS), gameStorage: createMockStorage(), clock: createMockClock() },
+    { sets: [{ id: "dairy", name: "Dairy", reward: 0 }] },
+  );
+  await c.init();
+  await c.sync();
+  const res = await c.claimSet("dairy"); // no transaction dep, reward 0 -> still fine
+  assert.equal(res.reward, 0);
+  assert.ok(c.getProgress().claimedSets.includes("dairy"));
+});
+
+test("a reward-0 claim persists claimed state across a reload", async () => {
+  const storage = createMockStorage();
+  const sets = [{ id: "dairy", name: "Dairy", reward: 0 }];
+  const a = createCollectionModule({ ...createMockDeps({ items: DAIRY_ITEMS }), gameStorage: storage }, { sets });
+  await a.init();
+  await a.sync();
+  await a.claimSet("dairy");
+
+  const b = createCollectionModule({ ...createMockDeps({ items: [] }), gameStorage: storage }, { sets });
+  const progress = await b.init();
+  assert.deepEqual(progress.claimedSets, ["dairy"]); // claimed state survived
+});
+
 test("discoveries and claimed sets persist across instances", async () => {
   const sharedStorage = createMockStorage();
   const deps1 = { ...createMockDeps({ items: DAIRY_ITEMS }), gameStorage: sharedStorage };

@@ -195,18 +195,25 @@ export function createCollectionModule(deps, options = {}) {
     if (progress.claimed) {
       throw new CollectionError(CollectionErrorCode.ALREADY_CLAIMED, `Set already claimed: ${setId}`, { setId });
     }
-    if (!transaction || typeof transaction.execute !== "function") {
-      throw new CollectionError(CollectionErrorCode.CLAIM_UNAVAILABLE, "Claiming needs deps.transaction", { setId });
-    }
-
-    const result = await transaction.execute({ amount: progress.reward, kind: "credit", reason: `collection:set:${setId}` });
-    if (!result || result.ok !== true) {
-      throw new CollectionError(CollectionErrorCode.TRANSACTION_FAILED, `Reward credit failed for ${setId}`, { setId, result });
+    // A non-positive reward (e.g. a V1-profile set with reward 0) must NOT touch
+    // the wallet at all — no 0-GP transaction, no ledger line — while still
+    // completing the claim (claimed state + persistence). Positive rewards are
+    // unchanged: they still require a transaction and credit through it.
+    let balance;
+    if (progress.reward > 0) {
+      if (!transaction || typeof transaction.execute !== "function") {
+        throw new CollectionError(CollectionErrorCode.CLAIM_UNAVAILABLE, "Claiming needs deps.transaction", { setId });
+      }
+      const result = await transaction.execute({ amount: progress.reward, kind: "credit", reason: `collection:set:${setId}` });
+      if (!result || result.ok !== true) {
+        throw new CollectionError(CollectionErrorCode.TRANSACTION_FAILED, `Reward credit failed for ${setId}`, { setId, result });
+      }
+      balance = result.balance;
     }
 
     state.claimedSets.push(setId);
     await persist();
-    return { ok: true, setId, reward: progress.reward, balance: result.balance };
+    return { ok: true, setId, reward: progress.reward, balance };
   }
 
   function dispose() {
