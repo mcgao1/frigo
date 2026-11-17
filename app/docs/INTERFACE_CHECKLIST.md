@@ -190,6 +190,16 @@ for the working rules and [`AGENTS.md`](../../AGENTS.md) for the AI-agent workfl
 
 > **Partial** consumption and **discard / spoilage must not** fire this — only a
 > full consume of the record earns GP.
+>
+> **Reward exclusions (partial / delete / discard / expiry) — Pending A/B
+> Integration, NOT verified.** "These earn no GP" holds in B *only because B has
+> no entrypoint for them*: the app routes solely `batchFullyConsumed` into
+> `recordConsume`, so B can neither reward nor unit-test them. B's passing tests
+> are therefore **not** evidence that real-inventory integration is correct — the
+> guarantee rests entirely on A firing `batchFullyConsumed` for a **true full
+> consume only**, and routing partial / delete / discard / expiry elsewhere (see
+> `food.batchDiscarded`). Must be confirmed by an A+B integration test with A's
+> real inventory before it can be called done.
 
 ## `food.batchDiscarded` (event / `cause` field)
 

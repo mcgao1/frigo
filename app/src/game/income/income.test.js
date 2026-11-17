@@ -184,6 +184,81 @@ test("consume state persists across re-init: processed batches don't re-reward, 
   assert.equal(money.getBalance(), CONSUME_GP);             // unchanged
 });
 
+// --- Phase 2B closure: an UNREWARDED but seen consume batch is deduped for life.
+// A batch that was skipped today (its type already earned, or the day's food cap
+// was full) is still a resolved event: it must never earn, even re-sent on a
+// later day when that type/cap is free again.
+
+test("a TYPE_DONE consume batch is recorded and can never earn, even re-sent on a later day", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  assert.equal((await inc.recordConsume("orange-A", "orange")).credited, true); // +3
+  // a second orange batch the same day: real consume, but the type already earned
+  const dup = await inc.recordConsume("orange-B", "orange");
+  assert.equal(dup.credited, false);
+  assert.equal(dup.reason, "TYPE_DONE");
+  assert.equal(inc.consumeBatchStatus("orange-B"), "type_done"); // recorded as processed
+
+  deps.clock._advanceDays(1); // next day orange COULD earn again — but only via a NEW batch
+  const replay = await inc.recordConsume("orange-B", "orange"); // this exact batch re-sent
+  assert.equal(replay.credited, false);
+  assert.equal(replay.reason, "DUPLICATE_BATCH"); // resolved for life, no back-pay
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP); // still only the one +3
+});
+
+test("a 4th-food consume batch is burned cap_exceeded and never back-paid on a later day", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  await inc.recordConsume("c-orange", "orange"); // +3
+  await inc.recordConsume("c-apple", "apple");   // +3
+  await inc.recordConsume("c-banana", "banana"); // +3  -> 3 distinct foods today
+  const over = await inc.recordConsume("c-grape", "grape"); // a 4th distinct food today
+  assert.equal(over.credited, false);
+  assert.equal(over.reason, "CAP_EXCEEDED");
+  assert.equal(inc.consumeBatchStatus("c-grape"), "cap_exceeded"); // recorded, burned
+
+  deps.clock._advanceDays(1); // next day the distinct-food cap is free again
+  const replay = await inc.recordConsume("c-grape", "grape"); // this exact batch re-sent
+  assert.equal(replay.credited, false);
+  assert.equal(replay.reason, "DUPLICATE_BATCH"); // the burned batch itself never back-pays
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * 3); // only the 3 day-1 rewards
+
+  // a genuinely NEW grape batch on the new day still earns (the cap, not the food, was the block)
+  assert.equal((await inc.recordConsume("grape-day2", "grape")).credited, true);
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * 4);
+});
+
+test("unrewarded consume batch statuses persist across re-init and still block a replay", async () => {
+  const storage = createMockStorage();
+  const money = createMockWalletWithTransactions(0);
+  const clock = createMockClock("2026-11-09");
+  const base = () => ({ transaction: money.transaction, gameStorage: storage, clock });
+
+  const a = createIncomeModule(base());
+  await a.init();
+  await a.recordConsume("r-orange", "orange");     // +3 rewarded
+  await a.recordConsume("r-orange-dup", "orange"); // TYPE_DONE, recorded seen
+  await a.recordConsume("r-apple", "apple");       // +3
+  await a.recordConsume("r-banana", "banana");     // +3  -> 3 foods today
+  await a.recordConsume("r-grape", "grape");       // CAP_EXCEEDED, recorded seen
+  assert.equal(money.getBalance(), CONSUME_GP * 3); // +9
+
+  const b = createIncomeModule(base());
+  await b.init();
+  // the unrewarded-but-seen statuses survived the reload
+  assert.equal(b.consumeBatchStatus("r-orange-dup"), "type_done");
+  assert.equal(b.consumeBatchStatus("r-grape"), "cap_exceeded");
+
+  clock._advanceDays(1); // a fresh day after the reload
+  assert.equal((await b.recordConsume("r-orange-dup", "orange")).reason, "DUPLICATE_BATCH");
+  assert.equal((await b.recordConsume("r-grape", "grape")).reason, "DUPLICATE_BATCH");
+  assert.equal(money.getBalance(), CONSUME_GP * 3); // no back-pay after a reload
+});
+
 test("GP only increases: caps yield no credit but never debit", async () => {
   const deps = createMockDeps({ balance: 7 });
   const inc = createIncomeModule(deps);
