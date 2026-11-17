@@ -7,10 +7,11 @@
  * Reuses the repair module's transaction / gameStorage / clock port shapes — no
  * income-specific A interface is needed.
  *
- * Income does NOT subscribe to food itself: the app routes food events
- * (batch entered / batch consumed, with a category) to `recordEntry()` /
- * `recordConsume(category)`, the same way it routes other cross-module signals.
- * Those food events are A's `food.subscribeEvents` additions, already Proposed.
+ * Income does NOT subscribe to food itself: the app routes A's food events to
+ * `recordEntry(batchId)` (from `food.batchAdded`) and
+ * `recordConsume(batchId, foodTypeId)` (from `food.batchFullyConsumed`), the same
+ * way it routes other cross-module signals. Those events + stable `batchId` /
+ * `foodTypeId` fields are A's additions, registered Proposed in the checklist.
  *
  * @typedef {import("../repair/ports.js").TransactionPort} TransactionPort
  * @typedef {import("../repair/ports.js").GameStoragePort} GameStoragePort

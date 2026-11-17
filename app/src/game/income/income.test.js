@@ -13,7 +13,7 @@ test("init starts with nothing earned and empty daily counters", async () => {
   const s = await inc.init();
   assert.equal(s.earned, 0);
   assert.equal(s.entries, 0);
-  assert.deepEqual(s.categories, []);
+  assert.deepEqual(s.consumedTypes, []);
 });
 
 test("openDay credits once per distinct day, and resets after the day rolls", async () => {
@@ -60,39 +60,128 @@ test("recordEntry pays up to the daily cap, then stops (cap_exceeded), resets ne
   assert.equal(r.entriesToday, 1);
 });
 
-test("recordConsume pays once per category, caps categories per day, resets next day", async () => {
+test("recordConsume pays +3 per foodTypeId: once per day, up to 3 distinct foods", async () => {
   const deps = createMockDeps();
   const inc = createIncomeModule(deps);
   await inc.init();
 
-  let r = await inc.recordConsume("dairy");
+  // three distinct foods fully consumed today, each its own batch -> +3 each
+  let r = await inc.recordConsume("b-orange-1", "orange");
   assert.equal(r.credited, true);
   assert.equal(r.amount, CONSUME_GP);
+  assert.equal(r.foodTypeId, "orange");
+  assert.deepEqual(r.typesToday, ["orange"]);
+  assert.equal((await inc.recordConsume("b-apple-1", "apple")).credited, true);
+  assert.equal((await inc.recordConsume("b-banana-1", "banana")).credited, true);
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * 3); // +9
 
-  r = await inc.recordConsume("dairy"); // same category again today
+  // same foodTypeId again today (a different batch) -> no reward
+  r = await inc.recordConsume("b-orange-2", "orange");
   assert.equal(r.credited, false);
-  assert.equal(r.reason, "CATEGORY_DONE");
+  assert.equal(r.reason, "TYPE_DONE");
 
-  await inc.recordConsume("greens");
-  await inc.recordConsume("fruit"); // 3rd distinct category (CONSUME_CAP = 3)
-  r = await inc.recordConsume("grains"); // 4th distinct → capped
+  // a 4th distinct food today -> capped
+  r = await inc.recordConsume("b-grape-1", "grape");
   assert.equal(r.credited, false);
-  assert.equal(r.reason, "DAILY_CAP");
-  assert.equal(deps.wallet.getBalance(), CONSUME_GP * CONSUME_CAP);
-  assert.ok(deps.ledger.some((l) => l.reason === "income:consume:dairy"));
-
-  deps.clock._advanceDays(1);
-  r = await inc.recordConsume("dairy");
-  assert.equal(r.credited, true); // category dedup resets with the new day
+  assert.equal(r.reason, "CAP_EXCEEDED");
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * CONSUME_CAP); // still +9
+  assert.ok(deps.ledger.some((l) => l.reason === "income:consume:orange"));
 });
 
-test("category keys are normalized so dedup is case/whitespace-insensitive", async () => {
+test("a new day re-rewards the same foodTypeId via a NEW batch", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  assert.equal((await inc.recordConsume("day1-orange", "orange")).credited, true);
+  deps.clock._advanceDays(1);
+  const r = await inc.recordConsume("day2-orange", "orange"); // a new real consume, new day
+  assert.equal(r.credited, true);
+  assert.equal(r.amount, CONSUME_GP);
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * 2);
+});
+
+test("the SAME batchId replayed across a day never re-rewards", async () => {
+  const deps = createMockDeps();
+  const inc = createIncomeModule(deps);
+  await inc.init();
+
+  assert.equal((await inc.recordConsume("orange-batch-X", "orange")).credited, true);
+  deps.clock._advanceDays(1);
+  const replay = await inc.recordConsume("orange-batch-X", "orange"); // same batch re-sent
+  assert.equal(replay.credited, false);
+  assert.equal(replay.reason, "DUPLICATE_BATCH");
+  // a genuinely new batch of the same food on the new day still earns
+  assert.equal((await inc.recordConsume("orange-batch-Y", "orange")).credited, true);
+  assert.equal(deps.wallet.getBalance(), CONSUME_GP * 2);
+});
+
+test("recordConsume requires a stable batchId and foodTypeId", async () => {
   const inc = createIncomeModule(createMockDeps());
   await inc.init();
-  await inc.recordConsume("Dairy");
-  const r = await inc.recordConsume("  dairy ");
-  assert.equal(r.credited, false);
-  assert.equal(r.reason, "CATEGORY_DONE");
+  for (const badBatch of [undefined, null, "", "   "]) {
+    await assert.rejects(() => inc.recordConsume(badBatch, "orange"), (e) => {
+      assert.equal(e.code, IncomeErrorCode.MISSING_BATCH_ID);
+      return true;
+    });
+  }
+  for (const badType of [undefined, null, "", "   "]) {
+    await assert.rejects(() => inc.recordConsume("b1", badType), (e) => {
+      assert.equal(e.code, IncomeErrorCode.MISSING_FOOD_TYPE);
+      return true;
+    });
+  }
+  assert.deepEqual(inc.getSnapshot().consumedTypes, []);
+  assert.equal(inc.getSnapshot().consumeBatchCount, 0);
+});
+
+test("a failed consume credit does not record the batch (retryable, no double-charge)", async () => {
+  let calls = 0, bal = 0;
+  const transaction = {
+    execute: ({ amount }) => {
+      calls += 1;
+      if (calls === 1) return { ok: false, balance: bal };
+      bal += amount;
+      return { ok: true, balance: bal };
+    },
+  };
+  const inc = createIncomeModule({ transaction, gameStorage: createMockStorage(), clock: createMockClock("2026-11-09") });
+  await inc.init();
+
+  await assert.rejects(() => inc.recordConsume("c1", "orange"), (e) => {
+    assert.equal(e.code, IncomeErrorCode.TRANSACTION_FAILED);
+    return true;
+  });
+  assert.equal(inc.hasConsumeBatch("c1"), false);
+  assert.deepEqual(inc.getSnapshot().consumedTypes, []);
+
+  const r = await inc.recordConsume("c1", "orange"); // retry earns its single reward
+  assert.equal(r.credited, true);
+  assert.equal(r.amount, CONSUME_GP);
+  assert.equal(inc.consumeBatchStatus("c1"), "rewarded");
+});
+
+test("consume state persists across re-init: processed batches don't re-reward, day bucket restored", async () => {
+  const storage = createMockStorage();
+  const money = createMockWalletWithTransactions(0);
+  const clock = createMockClock("2026-11-09");
+  const base = () => ({ transaction: money.transaction, gameStorage: storage, clock });
+
+  const a = createIncomeModule(base());
+  await a.init();
+  await a.recordConsume("p-orange", "orange"); // +3
+  assert.equal(money.getBalance(), CONSUME_GP);
+
+  const b = createIncomeModule(base());
+  const snap = await b.init();
+  assert.deepEqual(snap.consumedTypes, ["orange"]);        // today's bucket restored
+  assert.equal(b.consumeBatchStatus("p-orange"), "rewarded");
+
+  // replay the same batch after a reload -> no reward
+  assert.equal((await b.recordConsume("p-orange", "orange")).reason, "DUPLICATE_BATCH");
+  // same food, new batch, same day -> type already done -> no reward
+  assert.equal((await b.recordConsume("p-orange-2", "orange")).reason, "TYPE_DONE");
+  assert.equal(money.getBalance(), CONSUME_GP);             // unchanged
 });
 
 test("GP only increases: caps yield no credit but never debit", async () => {
@@ -118,7 +207,7 @@ test("state persists and reloads; same-day claims stay claimed after reload", as
   await a.init();
   await a.openDay();          // +5
   await a.recordEntry("persist-entry"); // +4
-  await a.recordConsume("dairy"); // +3
+  await a.recordConsume("persist-eat", "dairy"); // +3
 
   const b = createIncomeModule(base());
   const snap = await b.init();
@@ -126,7 +215,7 @@ test("state persists and reloads; same-day claims stay claimed after reload", as
   assert.equal(money.getBalance(), DAILY_OPEN_GP + ENTRY_GP + CONSUME_GP);
 
   assert.equal((await b.openDay()).credited, false);         // already opened today
-  assert.equal((await b.recordConsume("dairy")).credited, false); // category already done today
+  assert.equal((await b.recordConsume("persist-eat-2", "dairy")).credited, false); // foodTypeId already rewarded today
 });
 
 test("a failed credit transaction throws TRANSACTION_FAILED", async () => {

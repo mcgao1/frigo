@@ -13,8 +13,14 @@
  *                          or — if it arrives after the day's cap — is burned as
  *                          `cap_exceeded` and can never earn, across days,
  *                          reloads, or re-delivered "added" events.
- *   • recordConsume(cat)   +CONSUME GP per category consumed, each category once
- *                          per day, up to CONSUME_CAP categories per day.
+ *   • recordConsume(batchId, foodTypeId)
+ *                          +CONSUME GP when a specific food (foodTypeId) is FULLY
+ *                          consumed: once per foodTypeId per day, up to CONSUME_CAP
+ *                          foods per day. batchId + foodTypeId are REQUIRED; the
+ *                          batchId is deduped for life, so a replayed full-consume
+ *                          event never re-earns. A new day can re-earn the same
+ *                          foodTypeId via a NEW batch. Only full consumption
+ *                          reaches here — partial / discard / expiry do not (A).
  *
  * Hitting a cap is normal, not an error: the handler simply returns
  * `{ credited: false }` and no GP is given (no penalty). Per-day counters reset
@@ -41,6 +47,7 @@ export const CONSUME_CAP = 3;
 export const IncomeErrorCode = Object.freeze({
   TRANSACTION_FAILED: "TRANSACTION_FAILED",
   MISSING_BATCH_ID: "MISSING_BATCH_ID",
+  MISSING_FOOD_TYPE: "MISSING_FOOD_TYPE",
 });
 
 export class IncomeError extends Error {
@@ -58,10 +65,22 @@ function toISODate(value) {
   return String(value);
 }
 
-/** Normalize a category key so dedup is stable ("Dairy" === "dairy "). */
-function normCategory(value) {
-  const s = String(value ?? "").trim().toLowerCase();
-  return s || "uncategorized";
+/**
+ * Load the persisted consume-batch ledger into `{ batchId: "rewarded" |
+ * "type_done" | "cap_exceeded" }`, tolerating the older array form. Any seen
+ * batchId blocks a future reward; the label is diagnostic only.
+ */
+function normalizeConsumeBatches(value) {
+  const out = {};
+  const known = new Set(["rewarded", "type_done", "cap_exceeded"]);
+  if (Array.isArray(value)) {
+    for (const id of value) out[String(id)] = "rewarded";
+  } else if (value && typeof value === "object") {
+    for (const [id, status] of Object.entries(value)) {
+      out[String(id)] = known.has(status) ? status : "rewarded";
+    }
+  }
+  return out;
 }
 
 /**
@@ -109,13 +128,15 @@ export function createIncomeModule(deps, options = {}) {
   /**
    * @type {{ lastOpenDate: string|null, day: string|null, entries: number,
    *          entryBatches: Record<string, "rewarded"|"cap_exceeded">,
-   *          categories: string[], earned: number }}
-   * `entryBatches` is the lifetime ledger of resolved entry batchIds: "rewarded"
-   * (earned its single +entry) or "cap_exceeded" (arrived past the daily cap and
-   * burned). Either status blocks any future reward — across days, reloads, or
-   * re-delivered "added" events. Persisted.
+   *          consumedTypes: string[],
+   *          consumeBatches: Record<string, "rewarded"|"type_done"|"cap_exceeded">,
+   *          earned: number }}
+   * `entryBatches` / `consumeBatches` are lifetime ledgers of resolved batchIds —
+   * any seen batchId blocks a future reward (across days, reloads, re-delivered
+   * events). `consumedTypes` is the set of foodTypeIds already rewarded TODAY
+   * (reset each local day). All persisted.
    */
-  let state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, categories: [], earned: 0 };
+  let state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, consumedTypes: [], consumeBatches: {}, earned: 0 };
 
   async function persist() {
     await gameStorage.save({ key: storageKey, ...state });
@@ -133,11 +154,13 @@ export function createIncomeModule(deps, options = {}) {
         day: loaded.day ?? null,
         entries: Number.isFinite(loaded.entries) ? loaded.entries : 0,
         entryBatches: normalizeEntryBatches(loaded.entryBatches),
-        categories: Array.isArray(loaded.categories) ? [...loaded.categories] : [],
+        consumedTypes: Array.isArray(loaded.consumedTypes) ? [...loaded.consumedTypes]
+          : Array.isArray(loaded.categories) ? [...loaded.categories] : [],
+        consumeBatches: normalizeConsumeBatches(loaded.consumeBatches),
         earned: Number.isFinite(loaded.earned) ? loaded.earned : 0,
       };
     } else {
-      state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, categories: [], earned: 0 };
+      state = { lastOpenDate: null, day: null, entries: 0, entryBatches: {}, consumedTypes: [], consumeBatches: {}, earned: 0 };
     }
     return getSnapshot();
   }
@@ -147,7 +170,7 @@ export function createIncomeModule(deps, options = {}) {
     if (todayISO && todayISO !== state.day) {
       state.day = todayISO;
       state.entries = 0;
-      state.categories = [];
+      state.consumedTypes = [];
     }
   }
 
@@ -229,26 +252,61 @@ export function createIncomeModule(deps, options = {}) {
   }
 
   /**
-   * A category was consumed from the fridge: +consume GP, each category once per
-   * day, up to consumeCap categories per day.
-   * @param {string} category
+   * A specific food was FULLY consumed (A's `batchFullyConsumed` event):
+   * +consume GP, once per `foodTypeId` per local day, up to consumeCap foods per
+   * day. Both ids are REQUIRED and stable (from A).
+   *
+   * `batchId` is deduped for life, so a replayed full-consume event — same day,
+   * next day, or after a reload — never re-earns. A different (real new) batch of
+   * the same `foodTypeId` on a NEW day earns again. Reward is never per unit, per
+   * batch, or per big category — only per foodTypeId per day. Partial consume,
+   * delete, discard, and expiry do not fire this (A's responsibility).
+   * @param {string} batchId
+   * @param {string} foodTypeId
    */
-  async function recordConsume(category) {
-    const cat = normCategory(category);
+  async function recordConsume(batchId, foodTypeId) {
+    if (batchId == null || String(batchId).trim() === "") {
+      throw new IncomeError(IncomeErrorCode.MISSING_BATCH_ID, "recordConsume requires a stable batchId", { batchId });
+    }
+    if (foodTypeId == null || String(foodTypeId).trim() === "") {
+      throw new IncomeError(IncomeErrorCode.MISSING_FOOD_TYPE, "recordConsume requires a stable foodTypeId", { foodTypeId });
+    }
+    const bid = String(batchId);
+    const type = String(foodTypeId);
     const todayISO = await today();
     rollDay(todayISO);
-    if (state.categories.includes(cat)) {
+
+    // Lifetime batchId dedup: a full-consume event is resolved at most once ever,
+    // so a cross-day replay of the same batch never earns again.
+    const prior = state.consumeBatches[bid];
+    if (prior) {
       await persist();
-      return { credited: false, reason: "CATEGORY_DONE", amount: 0, category: cat };
+      return { credited: false, reason: "DUPLICATE_BATCH", amount: 0, batchId: bid, foodTypeId: type, status: prior };
     }
-    if (state.categories.length >= rates.consumeCap) {
+
+    // This foodTypeId already earned today (via another batch): this batch is a
+    // real consume but its type is done — record it seen (so its own replay can't
+    // earn later) and skip.
+    if (state.consumedTypes.includes(type)) {
+      state.consumeBatches[bid] = "type_done";
       await persist();
-      return { credited: false, reason: "DAILY_CAP", amount: 0, category: cat, cap: rates.consumeCap };
+      return { credited: false, reason: "TYPE_DONE", amount: 0, batchId: bid, foodTypeId: type, status: "type_done" };
     }
-    const result = await credit(rates.consume, `income:consume:${cat}`);
-    state.categories.push(cat);
+
+    // The day's distinct-food cap is full: record this batch seen and skip.
+    if (state.consumedTypes.length >= rates.consumeCap) {
+      state.consumeBatches[bid] = "cap_exceeded";
+      await persist();
+      return { credited: false, reason: "CAP_EXCEEDED", amount: 0, batchId: bid, foodTypeId: type, status: "cap_exceeded", cap: rates.consumeCap };
+    }
+
+    // credit() throws on a wallet failure BEFORE we record anything, so a failed
+    // reward leaves the batch unresolved and retryable (no double-charge).
+    const result = await credit(rates.consume, `income:consume:${type}`);
+    state.consumedTypes.push(type);
+    state.consumeBatches[bid] = "rewarded";
     await persist();
-    return { credited: true, amount: rates.consume, balance: result.balance, category: cat, categoriesToday: [...state.categories], cap: rates.consumeCap };
+    return { credited: true, amount: rates.consume, balance: result.balance, batchId: bid, foodTypeId: type, status: "rewarded", typesToday: [...state.consumedTypes], cap: rates.consumeCap };
   }
 
   /** Sync view of today's earning state (the app renders from this). */
@@ -258,7 +316,8 @@ export function createIncomeModule(deps, options = {}) {
       day: state.day,
       entries: state.entries,
       entryBatchCount: Object.keys(state.entryBatches).length,
-      categories: [...state.categories],
+      consumedTypes: [...state.consumedTypes],
+      consumeBatchCount: Object.keys(state.consumeBatches).length,
       earned: state.earned,
       rates: { ...rates },
     };
@@ -278,5 +337,14 @@ export function createIncomeModule(deps, options = {}) {
     return entryBatchStatus(batchId) !== null;
   }
 
-  return { init, openDay, recordEntry, recordConsume, getSnapshot, getEarned, hasEntryBatch, entryBatchStatus, storageKey };
+  /** This batch's lifetime consume status: "rewarded"|"type_done"|"cap_exceeded"|null. */
+  function consumeBatchStatus(batchId) {
+    return state.consumeBatches[String(batchId)] ?? null;
+  }
+  /** Has this batchId's full-consume event already been resolved? */
+  function hasConsumeBatch(batchId) {
+    return consumeBatchStatus(batchId) !== null;
+  }
+
+  return { init, openDay, recordEntry, recordConsume, getSnapshot, getEarned, hasEntryBatch, entryBatchStatus, hasConsumeBatch, consumeBatchStatus, storageKey };
 }
