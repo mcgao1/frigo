@@ -1,0 +1,478 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frigo — game sandbox</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Patrick+Hand&family=Permanent+Marker&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --paper:#F6F5F7; --ink:#3a2942; --red:#e5362b; --red-deep:#b7281f;
+    --green:#3b8a2f; --amber:#c98a12; --muted:#7a7280; --card:#fffdfb;
+  }
+  *{box-sizing:border-box;}
+  body{
+    margin:0; background:var(--paper); color:var(--ink);
+    font-family:"Patrick Hand","Segoe Print","Comic Sans MS",cursive; font-size:18px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px; margin:0 auto; padding:18px 16px 60px;}
+  header.top{
+    display:flex; flex-wrap:wrap; align-items:center; gap:14px;
+    position:sticky; top:0; z-index:5; background:var(--paper);
+    padding:10px 4px 12px; border-bottom:2px solid var(--ink);
+  }
+  h1{font-family:"Permanent Marker",cursive; color:var(--red); font-size:30px; margin:0; letter-spacing:.5px;}
+  h1 .sub{color:var(--ink); font-family:"Patrick Hand",cursive; font-size:17px; display:block; letter-spacing:0;}
+  .spacer{flex:1;}
+  .stat{background:var(--card); border:2px solid var(--ink); border-radius:12px; padding:6px 14px; line-height:1.1; text-align:center;}
+  .stat b{font-size:24px; display:block; color:var(--red-deep);}
+  .stat small{color:var(--muted); font-size:13px;}
+  button{font-family:inherit; cursor:pointer; -webkit-tap-highlight-color:transparent;}
+  .btn{
+    font-size:16px; color:#fff; background:var(--red); border:2px solid var(--red-deep);
+    border-radius:9px; padding:5px 12px; line-height:1.15; transition:transform .06s ease, filter .1s ease;
+  }
+  .btn:hover{filter:brightness(1.05);}
+  .btn:active{transform:translateY(2px) scaleY(.97);}
+  .btn.ghost{color:var(--ink); background:transparent; border:2px solid var(--ink);}
+  .btn[disabled]{opacity:.4; cursor:not-allowed; transform:none;}
+  .btn.big{font-size:18px; padding:8px 16px;}
+  #toast{
+    min-height:26px; margin:12px 2px 6px; padding:8px 14px; border-radius:10px;
+    background:#fff; border:2px dashed var(--ink); font-size:17px; transition:background .2s;
+  }
+  #toast.err{border-color:var(--red-deep); color:var(--red-deep); background:#fdf1f0;}
+  .grid{display:grid; grid-template-columns:repeat(auto-fill,minmax(300px,1fr)); gap:16px; margin-top:8px;}
+  .card{
+    background:var(--card); border:2.5px solid var(--ink); border-radius:16px; padding:14px 16px 16px;
+    box-shadow:3px 4px 0 rgba(58,41,66,.12);
+  }
+  .card:nth-child(odd){transform:rotate(-.4deg);}
+  .card:nth-child(even){transform:rotate(.4deg);}
+  .card h2{margin:0 0 4px; font-size:22px; display:flex; align-items:baseline; gap:8px;}
+  .card h2 .ico{font-size:22px;}
+  .card .desc{color:var(--muted); font-size:14px; margin:0 0 10px;}
+  .row{display:flex; align-items:center; gap:8px; padding:5px 0; border-top:1px dashed #d9d4de;}
+  .row:first-of-type{border-top:0;}
+  .row .name{flex:1;}
+  .row .meta{color:var(--muted); font-size:14px;}
+  .pill{font-size:13px; padding:1px 8px; border-radius:999px; border:1.5px solid; white-space:nowrap;}
+  .pill.ok{color:var(--green); border-color:var(--green);}
+  .pill.no{color:var(--muted); border-color:#cfc8d4;}
+  .pill.hot{color:var(--red-deep); border-color:var(--red-deep);}
+  .beats{margin:8px 0 0; padding-left:18px; font-size:15px; color:#4b3e52;}
+  .beats li{margin:2px 0;}
+  .hint{font-size:13px; color:var(--muted); margin-top:8px;}
+  .flags{display:flex; flex-wrap:wrap; gap:6px; margin-top:8px;}
+  .note{max-width:1040px; margin:4px auto 0; padding:10px 16px; font-size:14px; color:var(--muted);}
+  code{font-family:"Patrick Hand",monospace; background:#efeaf1; padding:0 4px; border-radius:4px;}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header class="top">
+    <h1>🧊 Frigo<span class="sub">game sandbox · 试玩台</span></h1>
+    <div class="spacer"></div>
+    <div class="stat"><b id="coins">—</b><small>💰 coins</small></div>
+    <div class="stat"><b id="date" style="font-size:18px">—</b><small>📅 in-game day</small></div>
+    <button class="btn big ghost" data-act="passday">Pass a day ▶</button>
+    <button class="btn big ghost" data-act="reset-sandbox" title="Wipe saved progress and start from scratch">↺ Reset sandbox</button>
+    <span id="persistchip" class="pill ok" style="align-self:center" title="Your progress is saved to this browser">💾 saved</span>
+  </header>
+  <div id="persistbanner" style="display:none; margin:10px 2px 0; padding:10px 14px; border:2px solid var(--red-deep); border-radius:10px; background:#fdf1f0; color:var(--red-deep); font-size:15px;">⚠️ This browser can’t save progress (localStorage is unavailable) — nothing here will survive a refresh. Everything still works, but for this session only.</div>
+  <div id="toast">Welcome! Your real game modules run on fake fridge data — and now your progress is <b>saved</b>: play a bit, reload the page, and it’s all still here. Hit <b>↺ Reset sandbox</b> to wipe it and start over.</div>
+  <div class="grid" id="grid">
+    <section class="card" id="p-income"></section>
+    <section class="card" id="p-repair"></section>
+    <section class="card" id="p-detector"></section>
+    <section class="card" id="p-voyage"></section>
+    <section class="card" id="p-exploration"></section>
+    <section class="card" id="p-collection"></section>
+    <section class="card" id="p-story"></section>
+    <section class="card" id="p-letters"></section>
+  </div>
+</div>
+<p class="note">Fake data only — A's real food / economy / infrastructure aren't built yet, so this uses mocks (300 starting coins, a small fridge, an advanceable clock). Phase 4A adds <b>persistence</b>: coins, fridge, detector, letters, voyage and the in-game day are saved to this browser and restored on refresh. It proves the <b>game logic</b> works. No real game art yet.</p>
+
+<script type="module">
+// ?dev query = a cache-buster tag on the module URLs. Serve app/ with any static
+// server (e.g. run `python -m http.server` inside app/) and open this page in a
+// browser. Add ?v1 for the V1 Economy Sandbox (0 GP), or leave it off for the Dev
+// sandbox (300 GP); add ?debug to expose window.frigo in the console.
+import { createRepairModule } from "./src/game/repair/repair.js?dev";
+import { createDetectorModule } from "./src/game/detector/detector.js?dev";
+import { createVoyageModule } from "./src/game/voyage/voyage.js?dev";
+import { createExplorationModule } from "./src/game/exploration/exploration.js?dev";
+import { createCollectionModule } from "./src/game/collection/collection.js?dev";
+import { createStoryModule } from "./src/game/story/story.js?dev";
+import { createLettersModule } from "./src/game/letters/letters.js?dev";
+import { createIncomeModule } from "./src/game/income/income.js?dev";
+import { createSandboxBackend } from "./src/game/sandbox/sandboxBackend.js?dev";
+import { createMockFood } from "./src/game/detector/mocks.js?dev";
+import { V1_ECONOMY_PROFILE, V1_NAMESPACE } from "./src/game/sandbox/v1EconomyProfile.js?dev";
+
+// ---- sandbox mode: Dev (default) vs V1 Economy (?v1) ----
+// Default = Developer Sandbox: 300 GP seed + the legacy DEFAULT reward configs,
+//   saved under namespace "playground" (the debug save).
+// ?v1    = V1 Economy Sandbox: starts from 0 GP with the V1 Economy Profile applied
+//   (legacy Collection / Story / Letters GP zeroed; only the confirmed Income rules
+//   earn GP), saved under a SEPARATE namespace "v1" so the two saves never mix.
+// The flag rides on the URL, so a Reset-reload stays in the same mode.
+const V1 = new URLSearchParams(location.search).has("v1");
+
+// ---- shared PERSISTENT sandbox backend (Phase 4A) ----
+// One wallet / storage / clock for every module, all backed by localStorage under
+// this mode's namespace — so your progress survives a real browser refresh.
+// "↺ Reset sandbox" wipes it back to the start; if localStorage is unavailable the
+// red banner says so and nothing will persist.
+const SANDBOX = createSandboxBackend({
+  namespace: V1 ? V1_NAMESPACE : "playground",
+  startDate: "2026-11-09",
+  startBalance: V1 ? 0 : 300,
+});
+const money = SANDBOX.money;          // persistent wallet: wallet / transaction / getBalance / ledger
+const storage = SANDBOX.gameStorage;  // persistent GameStorage (load / save)
+const clock = SANDBOX.clock;          // controllable + persisted clock: getLocalDate / _advanceDays / _reset
+const START = "2026-11-09T00:00:00Z";
+const iso = (d) => d.toISOString().slice(0, 10);
+const plus = (n) => { const d = new Date(START); d.setUTCDate(d.getUTCDate() + n); return iso(d); };
+const FOOD_EMOJI = { milk:"🥛", cheese:"🧀", yogurt:"🍶", lettuce:"🥬", spinach:"🥦" };
+const food = createMockFood([
+  { id:"milk1",    name:"Milk",    kind:"milk",    freshness:0.82, spoilsOn:plus(5) },
+  { id:"cheese1",  name:"Cheese",  kind:"cheese",  freshness:0.60, spoilsOn:plus(12) },
+  { id:"yogurt1",  name:"Yogurt",  kind:"yogurt",  freshness:0.30, spoilsOn:plus(2) },
+  { id:"lettuce1", name:"Lettuce", kind:"lettuce", freshness:0.45, spoilsOn:plus(3) },
+  { id:"spinach1", name:"Spinach", kind:"spinach", freshness:0.15, spoilsOn:plus(1) },
+]);
+const infrastructure = { applyRepair: async () => ({ ok: true }) };
+const base = { wallet: money.wallet, transaction: money.transaction, gameStorage: storage, clock };
+
+const repair      = createRepairModule({ ...base, infrastructure });
+const detector    = createDetectorModule({ ...base, food });
+const voyage      = createVoyageModule({ ...base }, { requirementsMet: () => repair.isComplete() && detector.isRepaired() });
+const exploration = createExplorationModule({ ...base });
+const collection  = createCollectionModule({ ...base, food }, V1 ? V1_ECONOMY_PROFILE.collection : {});
+const story       = createStoryModule({ ...base },            V1 ? V1_ECONOMY_PROFILE.story      : {});
+const letters     = createLettersModule({ ...base },          V1 ? V1_ECONOMY_PROFILE.letters    : {});
+const income      = createIncomeModule({ ...base });
+
+// ---- UI state ----
+let lastScan = null;
+let openLetter = null;
+const bal = () => money.getBalance();
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s).replace(/[&<>]/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;" }[c]));
+
+const FRIENDLY = {
+  INSUFFICIENT_FUNDS: "Not enough coins 💸",
+  ALL_OWNED: "You already own every fragment 🧩",
+  NOT_OWNED: "Buy that fragment first 🛒",
+  ALREADY_INSTALLED: "Already installed ✓",
+  NOT_READY: "Finish the fridge and detector first 🧊🔎",
+  NO_NEXT_PLANET: "You're already at the last planet 🪐",
+  NOT_READY_TO_DIG: "Use the app a few more days first ⛏️",
+  ALREADY_FOUND: "You already dug up the detector ✓",
+  NOT_FOUND: "Dig the detector up first ⛏️",
+  ALREADY_REPAIRED: "Detector already repaired ✓",
+  NOT_REPAIRED: "Repair the detector before scanning 🔧",
+  REPAIR_UNAVAILABLE: "Can't repair right now",
+  SET_INCOMPLETE: "Set isn't complete yet",
+  ALREADY_CLAIMED: "Already claimed ✓",
+  NO_GIFT: "This letter has no gift",
+  NOT_DELIVERED: "That letter hasn't arrived yet",
+  CHAPTER_LOCKED: "Chapter is still locked 🔒",
+};
+function toast(msg, isErr=false){ const t=$("toast"); t.textContent=msg; t.classList.toggle("err", isErr); }
+
+async function run(fn){
+  try { await fn(); }
+  catch(e){ toast(FRIENDLY[e?.code] || e?.message || "Something went wrong", true); }
+  renderAll();
+}
+
+// ---- actions ----
+async function doAction(act, id){
+  if(act==="reset-sandbox"){
+    if(!confirm("Reset the sandbox? This wipes ALL saved progress (coins, fridge, detector, letters, voyage, in-game day) back to the start.")) return;
+    SANDBOX.reset();            // clear the namespace + wallet + clock back to defaults
+    location.reload();          // reload = the real refresh path, now on a clean store
+    return;
+  }
+  if(act==="passday"){
+    clock._advanceDays(1);
+    const g = await income.openDay();                  // first open of the new day → +GP
+    const u = await detector.recordUseDay();           // a new day = a valid use day
+    if(u.justReady) await letters.trigger("detector:ready");
+    await letters.refresh();
+    const gp = g.credited ? ` (+${g.amount} GP daily)` : "";
+    toast(u.justReady
+      ? `📬 ${clock.getLocalDate()} — a letter arrived: dig by the fridge for the detector!${gp}`
+      : `A day passes → ${clock.getLocalDate()}${gp}`);
+    renderAll(); return;
+  }
+  await run(async () => {
+    switch(act){
+      case "buy-fragment":     { const r = await repair.buy(); toast(`🧩 Got: ${r.name} (balance ${r.balance}💰)`); break; }
+      case "install-fragment": { const r = await repair.install(id); await story.trigger("repair:any"); await letters.trigger("repair:any"); if(r.complete){ toast("🧊 Fridge complete! 🎉"); await story.trigger("fridge:complete"); await letters.trigger("fridge:complete"); } else { toast(`🔧 Installed ${r.installed}/${r.total}`); } break; }
+      case "dig-detector":    { const r = await detector.dig(); if(r.found){ await story.trigger("detector:found"); await letters.trigger("detector:found"); toast(`🔎 Found the detector on dig ${r.digs}/${r.digsToFind}! Now repair it (${detector.repairCost}💰)`); } else { toast(`⛏️ Dug ${r.digs}/${r.digsToFind} — nothing yet, keep digging (free)`); } break; }
+      case "repair-detector": { const r = await detector.repair(); await story.trigger("detector:repaired"); await letters.trigger("detector:repaired"); toast(`🔧 Detector repaired! (balance ${r.balance}💰) — scan away`); break; }
+      case "scan":     { lastScan = await detector.scan(); toast(`🔎 Scanned ${lastScan.readings.length} items`); break; }
+      case "voyage-depart": { const r = await voyage.depart(); await story.trigger("voyage:complete"); await letters.trigger("voyage:complete"); toast(`⛵ Arrived at ${r.planet.name}! (balance ${r.balance}💰)`); break; }
+      case "dig":      { const r = await exploration.dig(); const L=r.loot;
+                         const msg = L.type==="gp" ? `⛏️ Dug up ${L.gp} GP back!`
+                           : L.type==="recipe" ? `⛏️ Recipe${L.isNew?" (new!)":""}: ${L.name} 📜`
+                           : L.type==="tip" ? `⛏️ Tip${L.isNew?" (new!)":""}: ${L.name} 💡`
+                           : `⛏️ Just junk: ${L.name} 🗑️`;
+                         toast(`${msg} — balance ${bal()}💰`); break; }
+      case "sync":     { await collection.sync(); toast(`📒 Synced the fridge into the album`); break; }
+      case "claimset": { await collection.claimSet(id); toast(`📒 Set "${id}" claimed! balance ${bal()} coins`); await story.trigger(`collection:${id}`); await letters.trigger(`collection:${id}`); break; }
+      case "trigger":  { await story.trigger(id); await letters.trigger(id); toast(`🚩 Flag raised: ${id}`); break; }
+      case "refresh":  { await letters.refresh(); toast(`✉️ Mailbox refreshed`); break; }
+      case "open":     { openLetter = await letters.open(id); toast(`✉️ Opened: ${openLetter.subject}`); break; }
+      case "claimgift":{ await letters.claimGift(id); toast(`🎁 Gift claimed from ${id}! balance ${bal()} coins`); break; }
+      case "logbatch": { const batchId = `pg-batch-${Date.now()}-${(window.__pgBatchSeq=(window.__pgBatchSeq||0)+1)}`; const r = await income.recordEntry(batchId); toast(r.credited ? `🌱 +${r.amount} GP for a new batch — balance ${bal()}💰` : `📝 ${r.reason} (cap ${r.cap}/day)`); break; }
+      case "eat":      { const foodTypeId = id; const batchId = `pg-eat-${foodTypeId}-${Date.now()}-${(window.__pgEatSeq=(window.__pgEatSeq||0)+1)}`; const r = await income.recordConsume(batchId, foodTypeId); toast(r.credited ? `🌱 +${r.amount} GP for fully eating ${r.foodTypeId} — balance ${bal()}💰` : `🍽️ ${r.reason} (${r.foodTypeId})`); break; }
+    }
+  });
+}
+let busy = false;
+document.body.addEventListener("click", async (e) => {
+  const b = e.target.closest("[data-act]");
+  if(!b || busy) return;           // one action at a time — no overlapping re-renders
+  busy = true;
+  try { await doAction(b.dataset.act, b.dataset.id); }
+  finally { busy = false; }
+});
+
+// ---- renderers ----
+function renderTop(){ $("coins").textContent = bal(); $("date").textContent = clock.getLocalDate(); }
+
+function renderRepair(){
+  const items = repair.list(bal());
+  const prog = repair.getProgress();
+  const cost = items[0]?.cost ?? 5;
+  const left = items.filter(i => !i.owned).length;
+  const canBuy = left > 0 && bal() >= cost;
+  $("p-repair").innerHTML = `<h2><span class="ico">🧊</span> Build the fridge</h2>
+    <p class="desc">Buy fragments (random, ${cost}💰 each), then install them — ${prog.installed}/${prog.total} installed.</p>
+    <div class="row">
+      <span class="name">${left} fragment${left===1?"":"s"} left to buy</span>
+      <button class="btn" data-act="buy-fragment" ${canBuy?"":"disabled"}>Buy one · ${cost}💰</button>
+    </div>` +
+    items.map(c => `<div class="row">
+      <span class="name">${esc(c.name)}</span>
+      ${c.installed ? `<span class="pill ok">installed ✓</span>`
+        : c.owned ? `<button class="btn" data-act="install-fragment" data-id="${c.id}">Install</button>`
+        : `<span class="meta">locked</span>`}
+    </div>`).join("") +
+    (prog.complete ? `<p class="hint">Fridge complete! 🎉</p>` : ``);
+}
+
+function renderDetector(){
+  const p = detector.getProgress();
+  let body;
+  if(!p.found){
+    if(p.digReady){
+      body = `<div class="row" style="border-top:0">
+        <span class="name">📬 A letter says the detector is buried by the fridge. <span class="meta">dug ${p.digs}/${p.digsToFind}</span></span>
+        <button class="btn" data-act="dig-detector">Dig (free) · ${p.digs}/${p.digsToFind}</button>
+      </div>`;
+    } else {
+      const left = Math.max(0, p.threshold - p.useDays);
+      body = `<p class="hint">Use the app ${left} more day${left===1?"":"s"} (${p.useDays}/${p.threshold} use days) — then a letter arrives and you can dig the detector up. Hit “Pass a day”.</p>`;
+    }
+  } else if(!p.repaired){
+    body = `<div class="row" style="border-top:0">
+      <span class="name">🪫 You dug up a broken detector.</span>
+      <button class="btn" data-act="repair-detector" ${bal()>=p.repairCost?"":"disabled"}>Repair (${p.repairCost}💰)</button>
+    </div>`;
+  } else {
+    const rows = (lastScan?.readings||[]).map(r => {
+      const dot = r.status==="fresh"?"🟢":r.status==="aging"?"🟡":"🔴";
+      const extra = r.daysLeft!=null?` · ${r.daysLeft}d left`:"";
+      return `<div class="row"><span class="name">${dot} ${esc(r.name)}</span><span class="meta">${esc(r.status)}${extra}</span></div>`;
+    }).join("");
+    body = `<div class="row" style="border-top:0">
+        <button class="btn" data-act="scan">Scan fridge</button>
+        ${detector.isStale() && lastScan ? `<span class="meta">fridge changed — rescan</span>` : ``}
+      </div>
+      ${rows || `<p class="hint">Hit “Scan fridge” to read the food.</p>`}`;
+  }
+  const pill = p.repaired ? `<span class="pill ok">ready</span>`
+    : p.found ? `<span class="pill no">broken</span>`
+    : `<span class="pill no">${p.useDays}/${p.threshold}</span>`;
+  $("p-detector").innerHTML = `<h2><span class="ico">🔎</span> Detector ${pill}</h2>
+    <p class="desc">Find it on your 3rd use day, dig it up free, repair it for ${p.repairCost}💰 — then it flags what's about to spoil.</p>
+    ${body}`;
+}
+
+function renderVoyage(){
+  const st = voyage.getState();
+  const fridgeOK = repair.isComplete();
+  const detectorOK = detector.isRepaired();
+  const fundsOK = bal() >= st.cost;
+  const gates = [
+    `${fridgeOK?"✅":"⬜"} Fridge built`,
+    `${detectorOK?"✅":"⬜"} Detector repaired`,
+    `${fundsOK?"✅":"⬜"} ${st.cost}💰 fare`,
+  ].join(" · ");
+  let html = `<h2><span class="ico">⛵</span> Voyage <span class="pill ${st.nextPlanet?'no':'ok'}">🪐 ${esc(st.planet.name)}</span></h2>
+    <p class="desc">A one-way move to the next planet — the mainline finale. Costs ${st.cost}💰.</p>`;
+  if(st.nextPlanet){
+    const ready = fridgeOK && detectorOK && fundsOK;
+    html += `<div class="row" style="border-top:0">
+        <span class="name">Next: 🚀 <b>${esc(st.nextPlanet.name)}</b></span>
+        <button class="btn" data-act="voyage-depart" ${ready?"":"disabled"}>Depart (${st.cost}💰)</button>
+      </div>
+      <p class="hint">${gates}</p>`;
+  } else {
+    html += `<p class="hint">🏁 You've reached the last planet for now — more worlds later.</p>`;
+  }
+  if(st.arrivals.length){
+    html += st.arrivals.map(a => `<div class="row"><span class="name">🪐 ${esc(a.name)}</span><span class="meta">arrived ${esc(a.at)}</span></div>`).join("");
+  }
+  $("p-voyage").innerHTML = html;
+}
+
+function renderExploration(){
+  const s = exploration.getSnapshot();
+  const canDig = bal() >= s.cost;
+  const rFound = exploration.listRecipes().filter(r=>r.found).length;
+  const tFound = exploration.listTips().filter(t=>t.found).length;
+  const last = s.lastFind;
+  const lastTxt = !last ? "—"
+    : last.type==="gp" ? `+${last.gp} GP`
+    : last.type==="junk" ? `junk — ${last.name}`
+    : `${last.type}: ${last.name}`;
+  $("p-exploration").innerHTML = `<h2><span class="ico">⛏️</span> Dig site <span class="pill no">${s.digs} digs</span></h2>
+    <p class="desc">Pay ${s.cost}💰 to dig — you might turn up a recipe, a storage tip, a little GP back, or just junk.</p>
+    <div class="row" style="border-top:0">
+      <button class="btn" data-act="dig" ${canDig?"":"disabled"}>Dig (${s.cost}💰)</button>
+      <span class="meta">last: ${esc(lastTxt)}</span>
+    </div>
+    <div class="row"><span class="name">📜 Recipes</span><span class="meta">${rFound}/${s.totals.recipes}</span></div>
+    <div class="row"><span class="name">💡 Tips</span><span class="meta">${tFound}/${s.totals.tips}</span></div>
+    <div class="row"><span class="name">🗑️ Junk · 💰 GP back</span><span class="meta">${s.junk} junk · +${s.gpReturned} GP</span></div>`;
+}
+
+function renderCollection(){
+  const sets = collection.getSets();
+  const cat = collection.listCatalog();
+  const found = cat.filter(c=>c.discovered).map(c=>`${FOOD_EMOJI[c.kind]||"•"}`).join(" ");
+  $("p-collection").innerHTML = `<h2><span class="ico">📒</span> Collection</h2>
+    <p class="desc">Discover food kinds in the fridge, complete sets for rewards.</p>
+    <div class="row" style="border-top:0"><button class="btn" data-act="sync">Scan fridge → album</button>
+      <span class="meta">found: ${found||"—"}</span></div>` +
+    sets.map(s => `<div class="row">
+      <span class="name">${esc(s.name)} <span class="meta">(${s.found}/${s.total})</span></span>
+      ${s.claimed ? `<span class="pill ok">claimed ✓</span>`
+        : s.complete ? `<button class="btn" data-act="claimset" data-id="${s.id}">Claim +${s.reward}💰</button>`
+        : `<span class="pill no">${s.total-s.found} to go</span>`}
+    </div>`).join("");
+}
+
+function renderStory(){
+  const chapters = story.listChapters();
+  const cur = story.current();
+  const allFlags = [...new Set(chapters.flatMap(c=>c.requires))];
+  const rows = chapters.map(c => {
+    if(c.unlocked){
+      const beats = story.getBeats(c.id);
+      return `<div class="row" style="display:block">
+        <span class="name">📖 <b>${esc(c.title)}</b> <span class="pill ok">unlocked</span></span>
+        <ul class="beats">${beats.map(b=>`<li>${esc(b)}</li>`).join("")}</ul></div>`;
+    }
+    return `<div class="row"><span class="name">🔒 ${esc(c.title)}</span>
+      <span class="meta">needs: ${c.requires.map(f=>`<code>${esc(f)}</code>`).join(" ")}</span></div>`;
+  }).join("");
+  $("p-story").innerHTML = `<h2><span class="ico">📖</span> Story</h2>
+    <p class="desc">Chapters unlock as you play (flags are raised by repairing, voyaging, collecting…).</p>
+    ${rows}
+    <div class="flags"><span class="meta">raise a flag:</span>
+      ${allFlags.map(f=>`<button class="btn ghost" style="font-size:13px;padding:3px 9px" data-act="trigger" data-id="${f}">${esc(f)}</button>`).join("")}</div>
+    <p class="hint">Tip: these flags also fire automatically when you repair / claim a voyage / complete a set.</p>`;
+}
+
+function renderLetters(){
+  const inbox = letters.listInbox();
+  let html = `<h2><span class="ico">✉️</span> Letters <span class="pill no">${letters.unreadCount()} unread</span></h2>
+    <p class="desc">Letters arrive over time or when you hit milestones. Some carry coin gifts.</p>
+    <div class="row" style="border-top:0"><button class="btn ghost" data-act="refresh">Check mailbox</button></div>`;
+  if(!inbox.length){
+    html += `<p class="hint">Mailbox empty. “Pass a day” or complete a voyage to receive letters.</p>`;
+  } else {
+    html += inbox.map(l => {
+      const body = (openLetter && openLetter.id===l.id) ? `<ul class="beats">${(openLetter.body||[]).map(b=>`<li>${esc(b)}</li>`).join("")}</ul>` : "";
+      return `<div class="row" style="display:block">
+        <span class="name">${l.read?"📄":"📬"} <b>${esc(l.subject)}</b> <span class="meta">— ${esc(l.from)}</span>
+          <button class="btn ghost" style="font-size:13px;padding:3px 9px" data-act="open" data-id="${l.id}">Open</button>
+          ${l.hasGift && !l.claimed ? `<button class="btn" style="font-size:13px;padding:3px 9px" data-act="claimgift" data-id="${l.id}">🎁 Claim gift</button>` : l.claimed?`<span class="pill ok">gift claimed</span>`:""}
+        </span>${body}</div>`;
+    }).join("");
+  }
+  $("p-letters").innerHTML = html;
+}
+
+function renderIncome(){
+  const s = income.getSnapshot();
+  const openedToday = s.lastOpenDate === clock.getLocalDate();
+  const foods = ["orange","apple","banana","grape"];
+  const catBtns = foods.map(c => {
+    const done = s.consumedTypes.includes(c);
+    return `<button class="btn ghost" style="font-size:13px;padding:3px 10px" data-act="eat" data-id="${c}" ${done?"disabled":""}>${done?`${c} ✓`:`Eat ${c} +${s.rates.consume}`}</button>`;
+  }).join(" ");
+  $("p-income").innerHTML = `<h2><span class="ico">🌱</span> GreenPoints income <span class="pill ok">+${s.earned} earned</span></h2>
+    <p class="desc">GP only goes up — it rewards checking & planning the fridge, never punishes. Daily open +${s.rates.dailyOpen}, log a batch +${s.rates.entry} (≤${s.rates.entryCap}/day), fully eat a food +${s.rates.consume} (≤${s.rates.consumeCap}/day).</p>
+    <div class="row" style="border-top:0">
+      <span class="name">📅 Daily open</span>
+      <span class="meta">${openedToday?`claimed ✓ +${s.rates.dailyOpen}`:`next “Pass a day” →`}</span>
+    </div>
+    <div class="row">
+      <span class="name">📝 Log a batch <span class="meta">(${s.entries}/${s.rates.entryCap} today)</span></span>
+      <button class="btn" data-act="logbatch" ${s.entries>=s.rates.entryCap?"disabled":""}>Log batch +${s.rates.entry}</button>
+    </div>
+    <div class="row" style="display:block">
+      <span class="name">🍽️ Fully eat a food <span class="meta">(${s.consumedTypes.length}/${s.rates.consumeCap} today)</span></span>
+      <div style="margin-top:6px; display:flex; flex-wrap:wrap; gap:6px">${catBtns}</div>
+    </div>`;
+}
+
+function renderAll(){
+  renderTop(); renderIncome(); renderRepair(); renderDetector(); renderVoyage();
+  renderExploration(); renderCollection(); renderStory(); renderLetters();
+}
+
+// ---- boot ----
+(async () => {
+  // reflect the active mode in the header / intro / footer (test entry only — no formal UI)
+  const sub = document.querySelector("header .sub");
+  if(sub) sub.textContent = V1
+    ? "V1 Economy Sandbox · from 0 GP · namespace v1"
+    : "game sandbox · 试玩台 · Dev · namespace playground";
+  const note = document.querySelector(".note");
+  if(note) note.textContent = V1
+    ? "V1 Economy Sandbox — starts at 0 GP with the V1 Economy Profile applied: legacy Collection / Story / Letters rewards are zeroed, so only the confirmed Income rules (daily +5 / entry +4 / consume +3) earn GP. Saved under namespace v1, separate from the Dev save. Remove ?v1 from the URL for the 300-GP Dev sandbox."
+    : "Dev sandbox — 300 starting coins and the legacy reward configs (Collection / Story / Letters), saved under namespace playground. Fake data only — A's real food / economy / infrastructure aren't built yet. Append ?v1 to the URL for the V1 Economy Sandbox: 0 GP, legacy GP isolated, saved separately under namespace v1.";
+  const t0 = document.getElementById("toast");
+  if(t0) t0.innerHTML = V1
+    ? "🧪 <b>V1 Economy Sandbox</b> — you start at <b>0 GP</b>. Legacy Collection / Story / Letters rewards are off; only daily opens, logging batches and eating earn GP. Separate save (<b>v1</b>). Remove <b>?v1</b> from the URL for the Dev sandbox."
+    : "Welcome to the <b>Dev sandbox</b> — 300 GP, legacy rewards on, saved under <b>playground</b>. Add <b>?v1</b> to the URL for the V1 Economy Sandbox (starts at 0 GP, legacy GP isolated, separate save). ↺ Reset wipes progress.";
+  for(const m of [repair, detector, voyage, exploration, collection, story, letters, income]) await m.init();
+  await income.openDay();        // first open of the starting day → +GP
+  await detector.recordUseDay(); // today counts as the first valid use day
+  await collection.sync();      // pre-discover what's already in the fridge
+  await letters.refresh();
+  renderAll();
+  // persistence status: keep the "saved" chip, or warn clearly if localStorage is unavailable
+  if(!SANDBOX.isPersistent){ $("persistchip").style.display="none"; $("persistbanner").style.display="block"; }
+  if(location.search.includes("debug")){
+    window.frigo = { sandbox: SANDBOX, money, repair, detector, voyage, exploration, collection, story, letters, income, clock,
+      bal, render: renderAll, bump: () => clock._advanceDays(1) };
+  }
+})();
+</script>
+</body>
+</html>
