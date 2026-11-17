@@ -277,3 +277,16 @@ Recorded 2026-11-17 (Phase 0 review, confirmed Phase 2A). **Not yet mitigated �
    entry path now dedups by `batchId`; spend actions (dig, buy, depart) rely on
    the wallet rejecting an over-spend. Needs an A-side **idempotency key** on
    `transaction.execute`.
+
+3. **Event-date vs reward-date mismatch.** Income buckets the daily entry cap by
+   B's own clock (`clock.getLocalDate()` at the moment the event is processed),
+   **not** by the event's own date. If A stamps `food.batchAdded` with a
+   `localDate` that differs from B's processing day — an event created at 23:59
+   but handled after midnight, an offline-queued event replayed the next day, or
+   A and B resolving "local date" in different timezones — a +4 can land in the
+   wrong day's cap (or a 4th same-day batch slips through as "tomorrow").
+   **Interface need:** `food.batchAdded` (and `batchFullyConsumed`) must carry an
+   authoritative `localDate`; A and B must share **one** clock / timezone
+   definition; and B should bucket the daily cap by the **event's** `localDate`,
+   not wall-clock at processing. Not changed this round (needs a `recordEntry`
+   signature/decision) — recorded for A coordination. Priority: medium-high.
