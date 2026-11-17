@@ -362,3 +362,43 @@ test("KNOWN GAP: repeated free-dig calls each advance digCount (no idempotency k
   await m.detector.dig();
   assert.equal(m.detector.getDigs(), 2); // two calls = two digs; a ret/double-delivered dig would also count
 });
+
+// Phase 3C: Fri's clue letters deliver at their milestones during the real mainline,
+// stay unread, carry no GP, and never gate dig / repair / depart.
+test("Fri's clue letters deliver at milestones, unread + giftless, without blocking the mainline", async () => {
+  const w = makeWorld({ balance: 55 });
+  const m = w.wire();
+  await initAll(m);
+  await buildFridge(m.repair);
+
+  // 3rd use day -> detector:ready -> Fri's clue letter (the app raises the flag on justReady)
+  let p;
+  for (const d of USE_DAYS) {
+    p = await m.detector.recordUseDay(d);
+    if (p.justReady) await m.letters.trigger(DETECTOR_FLAGS.READY);
+  }
+  assert.equal(m.letters.isDelivered("fri-detector-clue"), true);
+  assert.equal(m.letters.isDelivered("fri-frostpeak-clue"), false); // not until repair
+
+  // three free digs find the detector WITHOUT anyone opening the letter (unread must not block)
+  const found = await digUpDetector(m.detector);
+  assert.equal(found.found, true);
+  assert.equal(m.letters.getState().read.includes("fri-detector-clue"), false); // still unread
+
+  // repair -> detector:repaired -> Fri's Frostpeak letter
+  const rep = await m.detector.repair();
+  if (rep.justRepaired) await m.letters.trigger(DETECTOR_FLAGS.REPAIRED);
+  assert.equal(m.letters.isDelivered("fri-frostpeak-clue"), true);
+
+  // departure still works with BOTH letters unread
+  const dep = await m.voyage.depart();
+  assert.equal(dep.planet.id, "frostpeak");
+
+  // the mainline letters added NO GP: the 55 GP ledger is unchanged, with no letters:* entries
+  assert.equal(totalDebited(w.money), 55);
+  assert.equal(w.money.ledger.filter((l) => String(l.reason).startsWith("letters:")).length, 0);
+  const inbox = m.letters.listInbox();
+  for (const id of ["fri-detector-clue", "fri-frostpeak-clue"]) {
+    assert.equal(inbox.find((x) => x.id === id).hasGift, false); // giftless in the inbox
+  }
+});

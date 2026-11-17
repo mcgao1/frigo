@@ -46,6 +46,40 @@ export const DEFAULT_LETTERS = [
     gift: 30,
     body: ["Captain,", "Word of your first voyage reached us. A small token of respect.", "— The Guild"],
   },
+  // --- Mainline: Fri's clue letters (flag-gated, no gift). Delivered by the app
+  // raising detector:ready / detector:repaired through letters.trigger(). Fri is a
+  // self-interested alien who covers up the crash and never just explains the rules.
+  {
+    id: "fri-detector-clue",
+    from: "Fri",
+    subject: "I might've left something behind...",
+    requires: ["detector:ready"],
+    gift: 0,
+    body: [
+      "Hey, human.",
+      "So... hypothetically, if someone lost a rather important piece of equipment during a perfectly controlled landing, where would it end up?",
+      "Because I'm picking up a strange signal right beside your fridge.",
+      "Might be nothing. Might be something I need.",
+      "Have a look around, will you? And try not to break anything else.",
+      "— Fri",
+    ],
+  },
+  {
+    id: "fri-frostpeak-clue",
+    from: "Fri",
+    subject: "Well, that's interesting.",
+    requires: ["detector:repaired"],
+    gift: 0,
+    body: [
+      "Huh. You actually got it working.",
+      "I mean, obviously. I knew you could.",
+      "The detector's picking up a signal from somewhere called Frostpeak. Cold place, apparently. Very cold.",
+      "Could be useful. Could be trouble.",
+      "Either way, once the fridge is ready, that's our next stop.",
+      "Don't get too excited. We still have work to do.",
+      "— Fri",
+    ],
+  },
 ];
 
 export const LettersErrorCode = Object.freeze({
