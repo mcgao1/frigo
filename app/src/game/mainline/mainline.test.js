@@ -171,11 +171,14 @@ test("Detector is independent of Exploration: a real paid dig is a different, se
   assert.ok(detectorReasons.every((r) => !String(r).startsWith("explore:"))); // detector never used Exploration
   assert.equal(detectorReasons.filter((r) => r === "detector:repair").length, 1);
 
-  // the paid Exploration dig, by contrast, DOES debit 5 GP with its own reason — a distinct system
-  const before = w.money.getBalance();
+  // the paid Exploration dig, by contrast, DOES debit 5 GP with its own reason — a distinct
+  // system. Assert the dig's own DEBIT is 5 (not the net balance delta, which also reflects
+  // that dig's random loot refund, e.g. explore:loot:gp +3/+6/+12 — asserting the delta was flaky).
   await m.exploration.dig();
-  assert.equal(before - w.money.getBalance(), 5);
-  assert.equal(w.money.ledger.filter((l) => l.reason === "explore:dig").length, 1);
+  const digDebits = w.money.ledger.filter((l) => l.reason === "explore:dig");
+  assert.equal(digDebits.length, 1);
+  assert.equal(digDebits[0].kind, "debit");
+  assert.equal(digDebits[0].amount, 5);
 });
 
 // 6: detector repair costs exactly 10 GP, once.
